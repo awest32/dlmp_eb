@@ -28,7 +28,7 @@ using DataFrames
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
-network = "case5"#"case5_matlab"#"case33bw"#"RTS_GMLC"#"case57"#"case118"#pglib_opf_case240_pserc"
+network = "case33bw"#"case5_matlab"#"case33bw"#"RTS_GMLC"#"case57"#"case118"#pglib_opf_case240_pserc"
 units = "MW"
 # if network == "case33bw"
 #     units == "kW"
@@ -66,7 +66,7 @@ ref = PowerModels.build_ref(data)[:it][:pm][:nw][0]
 # Define the cost of load shedding
 # Add the cost of the varying the loads (AW added 9/19/2024)
 #c_load_vary = LinRange(2500, 6000, 50)
-c_load_vary = LinRange(1000, 20000, 10)
+c_load_vary = LinRange(25, 20000, 10)
    # Assume the cost of varying the load is the same as the cost of generating power
 
 
@@ -113,7 +113,7 @@ q_dc = model.ext[:variables][:q_dc] = @variable(model, q_dc[a in ref[:arcs_dc]])
 # Add a variable to represent the cost of active power load at each bus (AW added 9/17/2024)
 # Find max load out of all of the loads
 max_load = maximum([load["pd"] for (i,load) in ref[:load]])
-min_load = minimum([load["pd"] for (i,load) in ref[:load]])
+min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
 p_load = model.ext[:variables][:p_load] = @variable(model, min_load <= p_load[i in keys(ref[:load])] <= max_load)
 
 for (l,dcline) in ref[:dcline]
@@ -265,7 +265,7 @@ for cost_ls in c_load_vary
     @objective(model, Min,
         sum(gen["cost"][1]*pg[i]^2 + gen["cost"][2]*pg[i] + gen["cost"][3] for (i,gen) in ref[:gen]) +
         sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] + dcline["cost"][3] for (i,dcline) in ref[:dcline]) +
-        sum(cost_ls*(load["pd"]-p_load[i]) for (i,load) in ref[:load])
+        sum(cost_ls*(p_load[i]-load["pd"])^2 for (i,load) in ref[:load])
     )
 
     ###############################################################################
@@ -321,7 +321,7 @@ display(plot(1, 1, legend = false))
 # Plot the load shed cost (y-axis) vs. load shed (x-axis)
 ls_costs = ls_dict[!,"ls_cost"] 
 ls_amounts = ls_dict[!,"ls_amount"]
-plt = scatter(ls_costs,ls_amounts, title = "Load Shed Costs vs. Load Shed Amount", xaxis = :log, xlabel = "Load Shed Cost (USD/MW p.u.)", ylabel = "Cummulative Load Shed Amount (MW p.u.)", legend = false)
+plt = scatter(ls_costs,ls_amounts, title = "Load Shed Costs vs. Load Shed Amount",  xlabel = "Load Shed Cost (USD/MW p.u.)", ylabel = "Cummulative Load Shed Amount (MW p.u.)", legend = false)
 savefig(plt, joinpath(save_folder,"Loadshed_and_Cost_$network.png"))
 # Check the value of an optimization variable
 # Example: Active power generated at generator 1
