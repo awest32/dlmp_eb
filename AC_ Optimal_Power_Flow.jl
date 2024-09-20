@@ -28,15 +28,18 @@ using DataFrames
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
-network = "case33bw"#"case5_matlab"#"case33bw"#"RTS_GMLC"#"case57"#"case118"#pglib_opf_case240_pserc"
+network = "case33bw_aw_edit"#"case5_matlab"#"case33bw"#"RTS_GMLC"#"case57"#"case118"#pglib_opf_case240_pserc"
 units = "MW"
 # if network == "case33bw"
 #     units == "kW"
 # else
 #     units == "MW"
 # end
-
-file_name = "$(powermodels_path)/test/data/matpower/$network.m"
+if network != "case33bw_aw_edit"
+    file_name = "$(powermodels_path)/test/data/matpower/$network.m"
+else
+    file_name = "$network.m"
+end
 # note: change this string to modify the network data that will be loaded
 
 # load the data file
@@ -66,7 +69,7 @@ ref = PowerModels.build_ref(data)[:it][:pm][:nw][0]
 # Define the cost of load shedding
 # Add the cost of the varying the loads (AW added 9/19/2024)
 #c_load_vary = LinRange(2500, 6000, 50)
-c_load_vary = LinRange(25, 20000, 10)
+c_load_vary = LinRange(25, 20000, 2)
    # Assume the cost of varying the load is the same as the cost of generating power
 
 
