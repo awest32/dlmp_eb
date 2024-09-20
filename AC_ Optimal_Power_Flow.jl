@@ -27,14 +27,14 @@ using DataFrames
 
 # Load System Data
 # ----------------
-powermodels_path = joinpath(dirname(pathof(PowerModels)), "..")
-network = "case33bw"
-units = ""
-if network == "case33bw"
-    units == "kW"
-else
-    units == "MW"
-end
+powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
+network = "case5"#"case5_matlab"#"case33bw"#"RTS_GMLC"#"case57"#"case118"#pglib_opf_case240_pserc"
+units = "MW"
+# if network == "case33bw"
+#     units == "kW"
+# else
+#     units == "MW"
+# end
 
 file_name = "$(powermodels_path)/test/data/matpower/$network.m"
 # note: change this string to modify the network data that will be loaded
@@ -45,6 +45,12 @@ powerplot(data)
 
 #get the date 
 date = Dates.today()
+
+#make a save folder for the plots 
+if !isdir("plots_$date")
+    mkdir("plots_$date")
+end
+save_folder = "plots_$date"
 # Add zeros to turn linear objective functions into quadratic ones
 # so that additional parameter checks are not required
 PowerModels.standardize_cost_terms!(data, order=2)
@@ -60,7 +66,7 @@ ref = PowerModels.build_ref(data)[:it][:pm][:nw][0]
 # Define the cost of load shedding
 # Add the cost of the varying the loads (AW added 9/19/2024)
 #c_load_vary = LinRange(2500, 6000, 50)
-c_load_vary = LinRange(1000, 1000000000, 1000)
+c_load_vary = LinRange(1000, 20000, 10)
    # Assume the cost of varying the load is the same as the cost of generating power
 
 
@@ -246,6 +252,12 @@ end
 from_idx = Dict(arc[1] => arc for arc in ref[:arcs_from_dc])
  # Save the load shedding cost and load shedding amount
  ls_dict = DataFrame(ls_cost=Float32[], ls_amount=Float32[])
+lmp_per_loadshed = Dict()
+network_buses = keys(ref[:bus])
+    net_buses = collect(network_buses)
+
+        # Clean the plot
+display(plot(1, 1, legend = false))
 
 for cost_ls in c_load_vary
     # Minimize the cost of active power generation and cost of HVDC line usage
@@ -268,7 +280,7 @@ for cost_ls in c_load_vary
 
     # Check the value of the objective function
     cost = objective_value(model)
-    println("The cost of generation is $(cost).")
+    #println("The cost of generation is $(cost).")
 
     #sum the total load shed 
     for (i,load) in ref[:load]
@@ -277,14 +289,40 @@ for cost_ls in c_load_vary
     ls_amount  =  sum(ls_amount)
     push!(ls_dict, [cost_ls, ls_amount])
     # save the load shedding cost and load shedding amount in a csv file with the cost_ls as the first column
-    CSV.write("load_shedding_$date.csv",ls_dict)
+    CSV.write(joinpath(save_folder,"load_shedding_$network.csv"),ls_dict)
+
+    #AW updates 9/11/2024 and 9/20/2024 insert into the objective loop
+    # Extract and store the LMPs for the active power balance constraints
+    lmp = []
+    
+    active_power_nodal_constraints = Dict(network_buses .=> model.ext[:constraints][:nodal_active_power_balance])
+    for (i,bus) in ref[:bus]
+        push!(lmp,dual(active_power_nodal_constraints[i]))
+    end
+    lmp_dict = Dict(network_buses .=> lmp)
+    lmp_per_loadshed[cost_ls] = lmp_dict
+    # Print the LMPs for the active power balance constraints
+    # println("The LMPs for the active power balance constraints are:")
+    # for (i,lmp_i) in lmp_dict
+    #     println("LMP at bus $i is $(lmp_i).")
+    # end
+
+    #plot the LMPs
+    sct = scatter!(net_buses, lmp/-ref[:baseMVA], title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="LMP (USD/$units h)", scatter=true, legend=true, label="$cost_ls")
+    # note: the LMPs are in $/MWh
+    # save the Plot
+    # Store the LMPs in a csv file
+    #CSV.write("lmp.csv", lmp)
+    savefig(sct,joinpath(save_folder,"lmp_$network.png"))
 end
+    # Clean the plot
+display(plot(1, 1, legend = false))
 
 # Plot the load shed cost (y-axis) vs. load shed (x-axis)
 ls_costs = ls_dict[!,"ls_cost"] 
 ls_amounts = ls_dict[!,"ls_amount"]
-scatter(ls_costs,ls_amounts, title = "Load Shed Costs vs. Load Shed Amount", xaxis = :log, xlabel = "Load Shed Cost (USD/MW p.u.)", ylabel = "Cummulative Load Shed Amount (MW p.u.)", legend = false)
-savefig("Loadshed_and_Cost_$date.png")
+plt = scatter(ls_costs,ls_amounts, title = "Load Shed Costs vs. Load Shed Amount", xaxis = :log, xlabel = "Load Shed Cost (USD/MW p.u.)", ylabel = "Cummulative Load Shed Amount (MW p.u.)", legend = false)
+savefig(plt, joinpath(save_folder,"Loadshed_and_Cost_$network.png"))
 # Check the value of an optimization variable
 # Example: Active power generated at generator 1
 pg1 = value(pg[1])
@@ -294,30 +332,6 @@ println("The active power generated at generator 1 is $(pg1*ref[:baseMVA]) $unit
 #print the total active load
 println("The total active load is $(sum([value(p_load[i]) for (i,load) in ref[:load]])*ref[:baseMVA]) $units.")
 #######
-#AW updates 9/11/2024
-# Extract and store the LMPs for the active power balance constraints
-lmp = []
-network_buses = keys(ref[:bus])
-net_buses = collect(network_buses)
-active_power_nodal_constraints = Dict(network_buses .=> model.ext[:constraints][:nodal_active_power_balance])
-for (i,bus) in ref[:bus]
-    push!(lmp,dual(active_power_nodal_constraints[i]))
-end
-lmp_dict = Dict(network_buses .=> lmp)
-
-# Print the LMPs for the active power balance constraints
-# println("The LMPs for the active power balance constraints are:")
-# for (i,lmp_i) in lmp_dict
-#     println("LMP at bus $i is $(lmp_i).")
-# end
-
-#plot the LMPs
-scatter(net_buses, lmp/ref[:baseMVA], title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="LMP (USD/$units h)", scatter=true, legend=false)
-# note: the LMPs are in $/MWh
-# save the Plot
-savefig("lmp_$date.png")
-# Store the LMPs in a csv file
-#CSV.write("lmp.csv", lmp)
 
 # Plot the voltage angles
 voltage_angles = []
@@ -327,7 +341,7 @@ end
 scatter(net_buses, voltage_angles, title="Voltage Angles", xlabel="Bus Number", ylabel="Voltage Angle (rad)", scatter=true, legend=false)
 # note: the voltage angles are in radians
 # save the Plot
-savefig("voltage_angles_$date.png")
+savefig(joinpath(save_folder,"voltage_angles_$network.png"))
 
 # Plot the voltage magnitudes
 voltage_magnitudes = []
@@ -350,7 +364,7 @@ plot!(net_buses, voltage_max_limits, line=(:dash), title="Voltage Magnitudes and
 plot!(net_buses, voltage_min_limits, line=(:dash), title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes_min_limits", legend=true)
 # note: the voltage magnitudes and limits are in per unit
 # save the Plot
-savefig("voltage_magnitudes_and_limits_$date.png")
+savefig(joinpath(save_folder,"voltage_magnitudes_and_limits_$network.png"))
 
 # Plot the line flows
 line_flows = []
@@ -363,7 +377,7 @@ end
 bar(line_names, line_flows, title="Line Flow Magnitudes", xlabel="Line Number", ylabel="Active Power Flow ($units p.u.)", legend=false)
 # note: the line flows are in per unit
 # save the Plot
-savefig("line_flows_$date.png")
+savefig(joinpath(save_folder,"line_flows_$network.png"))
 
 # PLot the line flows and line limits on the same Plot
 line_limits = []
@@ -374,7 +388,7 @@ bar(line_names, line_flows, title="Line Flows and Limits", xlabel="Line Number",
 plot!(line_names, line_limits, line=(:dash), title="Line Flows and Limits", xlabel="Line Number", ylabel="Active Power Flow ($units p.u.)", label = "line limits", legend=true)
 # note: the line flows and limits are in per unit
 # save the Plot
-savefig("line_flows_and_limits_$date.png")
+savefig(joinpath(save_folder,"line_flows_and_limits_$network.png"))
 
 #powerplot(data)
 
