@@ -2,7 +2,7 @@
 
 julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "bc978c498cbbcad9e7c437b0994a22fe78bed098"
+project_hash = "435120416ce91ca9603bc94dcfdf4e2b0cf901fd"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1096,6 +1096,12 @@ deps = ["Conda", "Dates", "Libdl", "LinearAlgebra", "MacroTools", "Serialization
 git-tree-sha1 = "4ba3651d33ef76e24fef6a598b63ffd1c5e1cd17"
 uuid = "438e738f-606a-5dbb-bf0a-cddfbfd45ab0"
 version = "1.92.5"
+
+[[deps.PyPlot]]
+deps = ["Colors", "LaTeXStrings", "PyCall", "Sockets", "Test", "VersionParsing"]
+git-tree-sha1 = "0371ca706e3f295481cbf94c8c36692b072285c2"
+uuid = "d330b81b-6aea-500a-939a-2ce795aea3ee"
+version = "2.11.5"
 
 [[deps.Qt6Base_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Fontconfig_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "OpenSSL_jll", "Vulkan_Loader_jll", "Xorg_libSM_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Xorg_libxcb_jll", "Xorg_xcb_util_cursor_jll", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_keysyms_jll", "Xorg_xcb_util_renderutil_jll", "Xorg_xcb_util_wm_jll", "Zlib_jll", "libinput_jll", "xkbcommon_jll"]
