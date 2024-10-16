@@ -22,10 +22,12 @@ using JuMP
 using PowerPlots
 using PowerModelsAnalytics
 using CSV, Plots
+import GR
 using Dates 
 using DataFrames
 using LinearAlgebra
 using Printf
+using JLD2
 include("index.jl")
 
 # Load System Data
@@ -52,7 +54,7 @@ powerplot(data)
 #get the date 
 date = Dates.today()
 
-plot_types = ["lmp", "line_flows", "voltage_angles", "voltage_magnitudes", "line_flows_and_limits", "voltage_magnitudes_and_limits", "percent_loadshed", "gini", "jain", "current_magnitudes_and_limits"]
+plot_types = ["lmp", "line_flows", "voltage_angles", "voltage_magnitudes", "line_flows_and_limits", "voltage_magnitudes_and_limits", "percent_loadserved", "gini", "jain", "current_magnitudes_and_limits"]
 #make a save folder for the plots 
 if !isdir("plots_$date")
     mkdir("plots_$date")
@@ -68,54 +70,13 @@ save_folder = "plots_$date/"
 # Define the number of tests and scenarios (combinations of 4-bit logic)
 n_tests = 10
 n_scenarios = 16  # 2^4 = 16 combinations of 4-bit boolean flags
-
-# Create the 4-bit logic combinations (Boolean values)
-bit_combinations = hcat([Bool.(bitstring(i)[end-3:end] .== '1') for i in 0:(n_scenarios-1)]...)
-scenarios = ["ls_obj","ls_fair_obj_1","ls_fair_obj_2"]#"ls_fair_constr"]
-
+scenarios = ["ls_obj", "ls_fair_obj_1","ls_fair_obj_2"]#["ls_obj","ls_fair_obj_1","ls_fair_obj_2"]#"ls_fair_constr"]
 # Now, generate a 2D matrix of boolean flags for the tests
 # Each row represents a test, and columns represent the scenarios
-# boolean_flags = Bool[false false false false;
-# false false false  true;
-# false false  true false;
-# false false  true  true;
-# false  true false false;
-# false  true false  true;
-# #false  true  true false;
-# #false  true  true  true;
-#  true false false false;
-#  true false false  true;
-#  true false  true false;
-#  true false  true  true;
-#  true  true false false;
-#  true  true false  true]
-#  #true  true  true false;
-#  #true  true  true  true]
-
- boolean_flags = Bool[true false false ;
-  true false false  ;
-  true false  true ;
-  true false  true  ;
-  true  true false ;
-  true  true false  ]
-  #true  true  true false;
-  #true  true  true  true]
+ boolean_flags = Bool[true false false; true true false; true false  true]
 
 #println("\nBoolean flags for each test (10x16 matrix):")
 #println(boolean_flags)
-
-
-# Add zeros to turn linear objective functions into quadratic ones
-# so that additional parameter checks are not required
-PowerModels.standardize_cost_terms!(data, order=2)
-
-# Adds reasonable rate_a values to branches without them
-PowerModels.calc_thermal_limits!(data)
-
-# use build_ref to filter out inactive components
-ref = PowerModels.build_ref(data)[:it][:pm][:nw][0]
-# note: ref contains all the relevant system parameters needed to build the OPF model
-# When we introduce constraints and variable bounds below, we use the parameters in ref.
 
 # Define the cost of load shedding
 # Add the cost of the varying the loads (AW added 9/19/2024)
@@ -128,13 +89,23 @@ c_fair = LinRange(1000, 1E6, 2)
 
 # Define a parameter to scale the load
 # Increasing will create an undervoltage problem
-scale_load = 10.0
+scale_load = 1.0
 scale_gen = scale_load
 
 # Define the threshold for the energy burden, aka the energy poverty threshold
 eb_threshold = 0.06 # 6% of the average load
 
+# Add zeros to turn linear objective functions into quadratic ones
+# so that additional parameter checks are not required
+PowerModels.standardize_cost_terms!(data, order=2)
 
+# Adds reasonable rate_a values to branches without them
+PowerModels.calc_thermal_limits!(data)
+
+# use build_ref to filter out inactive components
+ref = PowerModels.build_ref(data)[:it][:pm][:nw][0]
+# note: ref contains all the relevant system parameters needed to build the OPF model
+# When we introduce constraints and variable bounds below, we use the parameters in ref.
 
 ###############################################################################
 # 1. Building the Optimal Power Flow Model
@@ -333,16 +304,16 @@ net_buses = collect(network_buses)
 
 results = Dict()
 # Create the DataFrame
-df = DataFrame(
-    gini = Float64,
-    jain = Float64,
-    ls_percent = [zeros(length(net_buses))],  # Vectors are stored as single entries in rows
-    vm = [zeros(length(net_buses))],
-    line_flow_percent = [zeros(length(ref[:branch]))],
-    im = [zeros(length(ref[:branch]))],
-    im_max = [zeros(length(ref[:branch]))],
-    im_min = [zeros(length(ref[:branch]))],
-    lmp = [zeros(length(net_buses))]
+dict = Dict(
+    "gini" => 0,
+    "jain" => 0,
+    "ls_percent" => zeros(length(net_buses)),  # Vectors are stored as single entries in rows
+    "vm" => zeros(length(net_buses)),
+    "line_flow_percent" => zeros(length(ref[:branch])),
+    "im" => zeros(length(ref[:branch])),
+    "im_max" => zeros(length(ref[:branch])),
+    "im_min" => zeros(length(ref[:branch])),
+    "lmp" => zeros(length(net_buses))
 )
 
 # Populate the nested dictionary structure
@@ -353,7 +324,7 @@ for i in objective_choice
     for j in c_fair
         results[i][j] = Dict()
         for k in c_load_vary
-            results[i][j][k] = df
+            results[i][j][k] = dict
         end
     end
 end
@@ -382,12 +353,6 @@ for i in 1:r
     true_flags = findall(flags)
     #println("True flags: $true_flags")
     naming_test_files = ""
-    # if flags[1]==true
-    #     cost_ls = c_load_vary
-    #     ls_flag = 1
-    # else
-    #     ls_flag = 0
-    # end
     if flags[2] == true
         cost_fair = c_fair
         fair_obj_1 = 1
@@ -400,19 +365,6 @@ for i in 1:r
     else
         fair_obj_2 = 0
     end
-    # if flags[4] == true
-    #     #println("Test $i: Load Shedding Fairness Constraint")
-    #     for i in keys(ref[:load])
-    #         # Add the energy burden threshold constraint
-    #         model.ext[:constraints][:energy_burden] = @constraint(model, eb[i] <= eb_threshold)
-    #     end 
-    # end
-    # for tf in true_flags
-    #     naming_test_files = naming_test_files * "_" * scenarios[j]
-       
-    #     #println("Naming test files: $naming_test_files")
-    # end
-    #println("Test $i: $naming_test_files")
 
     # Determine which scenarios are active
     println("Scenarios: $scenarios")
@@ -439,6 +391,9 @@ for i in 1:r
             # Check that the solver terminated without an error
             println("The solver termination status is $(termination_status(model))")
 
+            # Print the cost of fairness
+            println("THE COST OF FAIRNESS IS $(cost_fair) (USD).")
+
             # Check the value of the objective function
             cost = objective_value(model)
             println("The cost of generation is $(cost) (USD).")
@@ -458,12 +413,14 @@ for i in 1:r
             #print the minimum voltage magnitude of the network
             println("The minimum voltage magnitude is $(minimum([value(vm[i]) for (i,bus) in ref[:bus]])) p.u.")
             
+            total_ref_load = scale_load*sum([load["pd"] for (i,load) in ref[:load]])
+
             ls_amount_vec = []
             for (i,load) in ref[:load]
                 push!(ls_amount_vec, abs(value(p_load[i]) - scale_load*ref[:load][i]["pd"]))
             end
             println("The total load shed is $(sum(ls_amount_vec)*ref[:baseMVA]) $units.")
-            ls_amount  =  sum(ls_amount_vec)
+            ls_amount_total  =  sum(ls_amount_vec)
 
             load_served_amount_vec = []
             for (i,load) in ref[:load]
@@ -475,57 +432,51 @@ for i in 1:r
             for (i,load) in ref[:load]
                 push!(load_served_percent_per_node, value(p_load[i])/(scale_load*ref[:load][i]["pd"]))
             end
-           # println("The total load served percent per node is $(load_served_percent_per_node).")
-
-            total_load = scale_load * sum([load["pd"] for (i,load) in ref[:load]])
-            ls_percent_vec = []
-            for (i,load) in ref[:load]
-                push!(ls_percent_vec, abs(value(p_load[i]) - scale_load*ref[:load][i]["pd"])/(scale_load*ref[:load][i]["pd"]))
-            end
-            
-            # push!(ls_percent_dict, [cost_ls, ls_percent_vec])
-            # push!(ls_dict, [cost_ls, ls_amount])
-            #println("The total load shed is $(ls_amount*ref[:baseMVA]) $units.")
-            # save the load shedding cost and load shedding amount in a csv file with the cost_ls as the first column
-            #CSV.write(joinpath(save_folder,"percent_loadshed/load_shedding_$(naming_test_files)_$network.csv"),ls_dict)
-
             #AW update 9/23/2024
             ##### remove zero load values in the ls_amount_vec
             load_served_percent_per_node = load_served_percent_per_node[load_served_percent_per_node .!= 0]
-            results[i][cost_fair][c_load_vary].ls_percent[1][1:length(ref[:load])] = load_served_percent_per_node*100
-            println("Total Loadshed Percent: ", sum(results[i][cost_fair][c_load_vary].ls_percent[1]))
-            HDF5.write("tlp_$(naming_test_files)_$network.csv", results[i][cost_fair][c_load_vary])
+            results[i][cost_fair][c_load_vary]["ls_percent"] = load_served_percent_per_node*100
+            #println("Load Served Percent: ", (results[i][cost_fair][c_load_vary]["ls_percent"]))
 
+            #print the average percentage of load served 
+            println("The total percentage of load served is $((sum(load_served_amount_vec)/(total_ref_load))*100) %.")
+
+
+            total_load = scale_load * sum([load["pd"] for (i,load) in ref[:load]])
+            loadshed_percent_vec = []
+            for (i,load) in ref[:load]
+                push!(loadshed_percent_vec, abs(value(p_load[i]) - scale_load*ref[:load][i]["pd"])/(scale_load*ref[:load][i]["pd"]))
+            end
+            
             # calculate the Gini coefficient for the load shedding
-            results[i][cost_fair][c_load_vary].gini = [gini_coefficient(load_served_percent_per_node)]
-           # println("The Gini coefficient is $(gini_per_loadshed*ref[:baseMVA]) $units).")    
+            results[i][cost_fair][c_load_vary]["gini"] = gini_coefficient(load_served_percent_per_node)
 
             # calculate the Jain index for the load shedding
-            results[i][cost_fair][c_load_vary].jain = [jain(load_served_percent_per_node)]
-            #println("The Jain index is $(jain_per_loadshed*ref[:baseMVA]) $units).")
-
-            #AW updates 9/11/2024 and 9/20/2024 insert into the objective loop
-            # Extract and store the LMPs for the active power balance constraints
-            #lmp = []
-            
+            results[i][cost_fair][c_load_vary]["jain"] = jain(load_served_percent_per_node)
+                      
             #print the gini and jain index
-            println("The Gini coefficient is $(results[i][cost_fair][c_load_vary].gini).")
-            println("The Jain index is $(results[i][cost_fair][c_load_vary].jain).")
+            println("The Gini coefficient is $(results[i][cost_fair][c_load_vary]["gini"]).")
+            println("The Jain index is $(results[i][cost_fair][c_load_vary]["jain"]).")
 
+            # save the active power lmps
             active_power_nodal_constraints = Dict(network_buses .=> model.ext[:constraints][:nodal_active_power_balance])
             lmp_vec = []
             for (i,bus) in ref[:bus]
                 push!(lmp_vec,dual(active_power_nodal_constraints[i]))
             end
-            results[i][cost_fair][c_load_vary].lmp[1][1:length(ref[:bus])] = lmp_vec
-            tot_lmp = sum(results[i][cost_fair][c_load_vary].lmp[1])
-            println("The LMPs are $(tot_lmp).")
+
+
+            results[i][cost_fair][c_load_vary]["lmp"] = lmp_vec
+            # This is the lmp in dollars per MW
+            # divide by 1000 to get it in dollars per KW
+            println("The LMPs are $(-lmp_vec/10^3).")
+            println("The average of the DLMPs are $(sum(-lmp_vec/10^3)/length(lmp_vec)).")
             # Save the voltage magnitudes
             voltage_magnitudes = []
             for (i,bus) in ref[:bus]
                 push!(voltage_magnitudes,value(vm[i]))
             end
-            results[i][cost_fair][c_load_vary].vm[1][1:length(ref[:bus])] = voltage_magnitudes
+            results[i][cost_fair][c_load_vary]["vm"] = voltage_magnitudes
 
             # save the line flows, current magnitudes and limits
             line_flow_percent = []
@@ -541,33 +492,14 @@ for i in 1:r
                 push!(im_max_vec,branch["rate_a"]/abs((ref[:bus][branch["f_bus"]]["vmax"] - ref[:bus][branch["t_bus"]]["vmax"])))
                 push!(line_names,"Line $i")
             end
-            results[i][cost_fair][c_load_vary].line_flow_percent[1][1:length(ref[:branch])] = line_flow_percent
+            results[i][cost_fair][c_load_vary]["line_flow_percent"] = line_flow_percent
                        
-            results[i][cost_fair][c_load_vary].im[1][1:length(ref[:branch])] = im_vec
+            results[i][cost_fair][c_load_vary]["im"] = im_vec
             # Save the current limits 
 
-            results[i][cost_fair][c_load_vary].im_max[1][1:length(ref[:branch])] = im_max_vec
-            results[i][cost_fair][c_load_vary].im_min[1][1:length(ref[:branch])] = im_min_vec
-
-            ###########vmp = scatter3d(net_buses,cost_ls, voltage_magnitudes, title="Voltage Magnitudes", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", scatter=true)
-            # note: the voltage magnitudes are in per unit
-            # save the Plot
-            ###########savefig(vmp,joinpath(save_folder,"voltage_magnitudes/$(naming_test_files)_$(cost_fair)_$network.png"))
-            # Plot the voltage magnitudes and limits on the same Plot
-            ###########voltage_max_limits = []
-            ###########voltage_min_limits = []
-            # for (i,bus) in ref[:bus]
-            #     push!(voltage_max_limits,ref[:bus][i]["vmax"])
-            #     push!(voltage_min_limits,ref[:bus][i]["vmin"])
-            # end
-            ###########vm_limp = scatter(net_buses, cost_ls,voltage_magnitudes, title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes", label=@sprintf("%.2f",cost_fair))
-            # plot!(net_buses, voltage_max_limits, line=(:dash), title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes_max_limits")
-            # plot!(net_buses, voltage_min_limits, line=(:dash), title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes_min_limits")
-            # # note: the voltage magnitudes and limits are in per unit
-            # save the Plot
-            ########savefig(vm_limp, joinpath(save_folder,"voltage_magnitudes_and_limits/$(naming_test_files)_$(cost_fair)_$network.png"))        
-        #end
-        println("The total loadshed percent is $(sum(results[4][1000][2000].ls_percent[1]))")
+            results[i][cost_fair][c_load_vary]["im_max"] = im_max_vec
+            results[i][cost_fair][c_load_vary]["im_min"] = im_min_vec
+            save("results_exp_$(i)_$(cost_fair).jld2", "results", results)
     end
 end
 # plot the percent load shed per bus for each test scenario and each value od the fairness cost
@@ -581,37 +513,65 @@ for i in 1:r
     end
     for j in c_fair
 # plot all the load shed percentages for each bus for all load
+        k = c_load_vary
         ls_plt = plot()
-        #for k in c_load_vary
-            results_df_test = CSV.read("tlp__case33bw_aw_edit.csv", DataFrame)
+            results = load("results_exp_$(i)_$(j).jld2", "results")
            # println("Results: ", keys(results_df_test))
-            ls_percent_per_node = (results_df_test.ls_percent[1])
-            ls_plt = plot!(bar!(net_buses, ls_percent_per_node[1], title="Load Shed Percentages", xlabel="Bus Number", ylabel="Load Shed Costs (USD/MW)", legend=true, label=@sprintf("%.2f",j)))
-            println("Total Load Shed Percentages: ", sum(results[i][j][c_load_vary].ls_percent[1]))
+            ls_percent_per_node = results[i][j][c_load_vary]["ls_percent"]
+            ls_plt = scatter(net_buses, ls_percent_per_node, title="Load Shed Percentages", xlabel="Bus Number", ylabel="Load Shed Costs (USD/MW)", legend=true, label=@sprintf("%.2f",j))
+            println("Total Load Served Percentages: ", sum(results[i][j][c_load_vary]["ls_percent"]))
         #end
-        savefig(ls_plt, joinpath(save_folder,"percent_loadshed/percent_loadshed_$(naming_test_files)_fairness_$(j)_$network.png"))
+        savefig(ls_plt, joinpath(save_folder,"percent_loadserved/percent_loadserved_$(naming_test_files)_fairness_$(j)_$network.png"))
 # plot the voltage magnitudes for each bus for all load
         vm_plt = plot()
         for k in c_load_vary
-            vm_plt = scatter!(net_buses, results[i][j][k].vm[1], title="Voltage Magnitudes", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", scatter=true, legend=true, label=@sprintf("%.2f",j))
+            vm_plt = scatter!(net_buses, results[i][j][k]["vm"], title="Voltage Magnitudes", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", scatter=true, legend=true, label=@sprintf("%.2f",j))
         end
         savefig(vm_plt, joinpath(save_folder,"voltage_magnitudes/voltage_magnitudes_$(naming_test_files)_fairness_$(j)_$network.png"))
     
 # plot the current magnitude and limits on the same figure
         im_plt = plot()
         for k in c_load_vary
-            im_plt = scatter!(net_buses, results[i][j][k].im[1], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)", scatter=true, legend=true, label=@sprintf("%.2f",j))
-            im_plt = scatter!(net_buses, results[i][j][k].im_max[1], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)",scatter=true,label=false)
-            im_plt = scatter!(net_buses, results[i][j][k].im_min[1], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)",scatter=true,label=false)
+            im_plt = scatter!(net_buses, results[i][j][k]["im"], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)", scatter=true, legend=true, label=@sprintf("%.2f",j))
+            im_plt = scatter!(net_buses, results[i][j][k]["im_max"], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)",scatter=true,label=false)
+            im_plt = scatter!(net_buses, results[i][j][k]["im_min"], title="Current Magnitudes", xlabel="Bus Number", ylabel="Current Magnitude (p.u.)",scatter=true,label=false)
         end
         savefig(im_plt, joinpath(save_folder,"current_magnitudes_and_limits/current_magnitudes_$(naming_test_files)_fairness_$(j)_$network.png"))
 # plot the LMPs
         lmp_plt = plot()
         for k in c_load_vary
-            lmp_plt = scatter!(net_buses, results[i][j][k].lmp[1]/(-ref[:baseMVA]), title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="LMP (USD/MW)", scatter=true, legend=true, label=@sprintf("%.2f",j))
+            lmp_plt = scatter!(net_buses, results[i][j][k]["lmp"]/(-ref[:baseMVA]), title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="LMP (USD/MW)", scatter=true, legend=true, label=@sprintf("%.2f",j))
         end
         savefig(lmp_plt, joinpath(save_folder,"lmp/lmp_$(naming_test_files)_fairness_$(j)_$network.png"))
+    
     end
+
+    # Plot a heatmap for the lmps, buses, and fairness cost
+    lmp_heatmap = heatmap()
+    heatmap_data = zeros(length(c_fair), length(net_buses))
+    using PlotlyJS
+    index = 0
+    for j in c_fair
+        index+=1
+            heatmap_data[index,:] = results[i][j][c_load_vary]["lmp"] 
+            println("Heatmap Data: ", heatmap_data)
+            println(size(heatmap_data))
+    end
+    lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="Fairness Cost", color=:viridis)
+    savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$(naming_test_files)_$network.png"))
+
+    # plot the percent loadshed per bus heatmap
+    ls_heatmap = heatmap()
+    ls_heatmap_data = zeros(length(c_fair), length(net_buses)-1)
+    index = 0
+    for j in c_fair
+        index+=1
+        ls_heatmap_data[index,:] = results[i][j][c_load_vary]["ls_percent"]
+    end
+    ls_heatmap = heatmap(ls_heatmap_data, title="Load Shed Percentages", xlabel="Bus Number", ylabel="Fairness Cost", color=:viridis)
+    savefig(ls_heatmap, joinpath(save_folder, "percent_loadserved/percent_loadserved_heatmap_$(naming_test_files)_$network.png"))
+    #layout = Layout(;yaxis = attr(tickmode = "array", tickvals = [1, 2], ticktext = ["Group A", "Group B"]))
+    #plot([lmp_heatmap], layout)
 
     # Plot the Gini coefficient and Jain index
     # Assuming `results` is a nested dictionary like this:
@@ -623,151 +583,33 @@ for i in 1:r
     z_jain_values = Float64[]  # Jain index (z-axis)
 
     # Loop through the nested dictionary to extract the values
-    for fairness_cost in keys(results[i])
-        for loadshed_cost in keys(results[i][fairness_cost])
-            gini_value = results[i][fairness_cost][loadshed_cost].gini[1]  # Extract the Gini coefficient
-            jain_value = results[i][fairness_cost][loadshed_cost].jain[1]  # Extract the Jain index
-            # Append the data to the respective arrays
-            push!(x_values, loadshed_cost)
-            push!(y_values, fairness_cost)
-            push!(z_gini_values, gini_value)
-            push!(z_jain_values, jain_value)
-        end
+    for j in c_fair
+        results = load("results_exp_$(i)_$(j).jld2", "results")
+        gini_value = results[i][j][c_load_vary]["gini"]  # Extract the Gini coefficient
+        jain_value = results[i][j][c_load_vary]["jain"]  # Extract the Jain index
+        # Append the data to the respective arrays
+        push!(y_values, j)
+        push!(z_gini_values, gini_value)
+        push!(z_jain_values, jain_value)
+        println("Fairness Cost: $j, Gini Coefficient: $gini_value, Jain Index: $jain_value")
     end
-
-    # Now create a 3D scatter plot
-    gini_plt = plot3d()
-    gini_plt = scatter3d(x_values, y_values, z_gini_values, xlabel="Load Shedding Cost", ylabel="Fairness Cost", zlabel="Gini Coefficient", 
-            title="Gini Coefficient vs Load Shedding Cost and Fairness Cost",
+    
+    gini_plt = plot()
+    gini_plt = scatter(y_values, z_gini_values, xlabel="Fairness Cost", ylabel="Gini Coefficient", 
+            title="Gini Coefficient vs Fairness Cost",
             marker=:circle, color=:blues, legend=false)
 
-    jain_plt= plot3d()
-    jain_plt = scatter3d(x_values, y_values, z_jain_values, xlabel="Load Shedding Cost", ylabel="Fairness Cost", zlabel="Jain Index", 
-            title="Jain Index vs Load Shedding Cost and Fairness Cost",
+    jain_plt= plot()
+    jain_plt = scatter(y_values, z_jain_values, xlabel="Fairness Cost", ylabel="Jain Index", 
+            title="Jain Index vs Fairness Cost",
             marker=:circle, color=:reds, legend=false)
     # Save the plot
     savefig(gini_plt, joinpath(save_folder, "gini/gini_$(naming_test_files)_$network.png"))
     savefig(jain_plt, joinpath(save_folder, "jain/jain_$(naming_test_files)_$network.png"))
     # Alternatively, if you want a surface plot, you can use:
     # plot(x_values, y_values, z_values, seriestype=:surface, xlabel="Load Shedding Cost", ylabel="Fairness Cost", zlabel="Gini Coefficient")
-
+    
 end
-
-
-# #Clean the plot
-# display(plot(1, 1, legend = false))
-#  # Plot the line flows
-#  line_flow_percent = []
-#  line_names = []
-#  for (i,branch) in ref[:branch]
-#      f_idx = (i, branch["f_bus"], branch["t_bus"])
-#      push!(line_flow_percent,abs(value(p[f_idx]))/branch["rate_a"])
-#      push!(line_names,"Line $i")
-#  end
-#  lfp = scatter(line_names, line_flow_percent, title="Line Flow Magnitudes", xlabel="Line Number", ylabel="Active Power Flow ($units p.u.)", scatter=true, legend=true, label=@sprintf("%.2f",cost_ls))
-#  # note: the line flows are in per unit
-#  # save the Plot
-#  savefig(lfp, joinpath(save_folder,"line_flows_and_limits/line_flows_percent_$(naming_test_files)_$network.png"))
-
-#  # Plot the voltage magnitudes
-#  voltage_magnitudes = []
-#  for (i,bus) in ref[:bus]
-#      push!(voltage_magnitudes,value(vm[i]))
-#  end
-#  vmp = scatter(net_buses, voltage_magnitudes, title="Voltage Magnitudes", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", scatter=true, legend=false)
-#  # note: the voltage magnitudes are in per unit
-#  # save the Plot
-#  savefig(vmp,joinpath(save_folder,"voltage_magnitudes/$(naming_test_files)_$network.png"))
-#  # Plot the voltage magnitudes and limits on the same Plot
-#  voltage_max_limits = []
-#  voltage_min_limits = []
-#  for (i,bus) in ref[:bus]
-#      push!(voltage_max_limits,ref[:bus][i]["vmax"])
-#      push!(voltage_min_limits,ref[:bus][i]["vmin"])
-#  end
-#  vm_limp = scatter(net_buses, voltage_magnitudes, title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes", legend=false)
-#  plot!(net_buses, voltage_max_limits, line=(:dash), title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes_max_limits", legend=false)
-#  plot!(net_buses, voltage_min_limits, line=(:dash), title="Voltage Magnitudes and Limits", xlabel="Bus Number", ylabel="Voltage Magnitude (p.u.)", label="voltage_magnitudes_min_limits", legend=true)
-#  # note: the voltage magnitudes and limits are in per unit
-#  # save the Plot
-#  savefig(vm_limp, joinpath(save_folder,"voltage_magnitudes_and_limits/$(naming_test_files)_$network.png"))
-# # Plot the load shed cost (y-axis) vs. load shed (x-axis)
-# ls_costs = ls_dict[!,"ls_cost"] 
-# ls_amounts = ls_dict[!,"ls_amount"]
-# plt = scatter(ls_costs,ls_amounts, title = "Load Shed Costs vs. Load Shed Amount",  xlabel = "Load Shed Cost (USD/MW p.u.)", ylabel = "Cummulative Load Shed Amount ($units p.u.)", legend = false)
-# savefig(plt, joinpath(save_folder,"Loadshed_and_Cost_$network.png"))
-# plot!()
-# # Plot the load shed vs. the gini index
-# # create the legend lables 
-# legend_labels = permutedims([@sprintf("%.2f", costs) for costs in ls_costs])
-
-# #Clean the plot
-# display(plot(1, 1, legend = false))
-# legend_labels = permutedims([@sprintf("%.2f", costs) for costs in ls_costs])
-
-# ls_v_gini = scatter!(gini_per_loadshed, ls_amounts, title="Total Load Shed vs. Gini Index", xlabel="Gini Index", ylabel="Load Shed ($units p.u.)", xlim = [0,1], scatter=true, legend=true, label="")
-# # Add each point as its own series to assign unique legend labels
-# for i in 1:length(gini_per_loadshed)
-#     scatter!([gini_per_loadshed[i]], [ls_amounts[i]], label=legend_labels[i], marker=:circle)
-# end
-# savefig(ls_v_gini,joinpath(save_folder,"gini_$network.png"))
-
-# # Clean the plot
-# display(plot(1, 1, legend = false))
-
-# # Plot the load shed vs. the jain index
-# ls_v_jain = scatter!(jain_per_loadshed, ls_amounts, title="Total Load Shed vs. Jain Index", xlabel="Jain Index", ylabel="Load Shed ($units p.u.)", xlim = [0,1],scatter=true, legend=true, label="")
-# # Add each point as its own series to assign unique legend labels
-# for i in 1:length(jain_per_loadshed)
-#     scatter!([jain_per_loadshed[i]], [ls_amounts[i]], label=legend_labels[i], marker=:circle)
-# end
-# savefig(ls_v_jain,joinpath(save_folder,"jain_$network.png"))
-# Check the value of an optimization variable
-# Example: Active power generated at generator 1
-#pg1 = value(pg[1])
-##println("The active power generated at generator 1 is $(pg1*ref[:baseMVA]) $units.")
-# note: the optimization model is in per unit, so the baseMVA value is used to restore the physical units
-
-
-#######
-
-# # Plot the voltage angles
-# voltage_angles = []
-# for (i,bus) in ref[:bus]
-#     push!(voltage_angles,value(va[i]))
-# end
-# scatter(net_buses, voltage_angles, title="Voltage Angles", xlabel="Bus Number", ylabel="Voltage Angle (rad)", scatter=true, legend=false)
-# # note: the voltage angles are in radians
-# # save the Plot
-# savefig(joinpath(save_folder,"voltage_angles_$network.png"))
-
-
-
-# # Plot the line flows
-# line_flows = []
-# line_names = []
-# for (i,branch) in ref[:branch]
-#     f_idx = (i, branch["f_bus"], branch["t_bus"])
-#     push!(line_flows,abs(value(p[f_idx])))
-#     push!(line_names,"Line $i")
-# end
-# bar(line_names, line_flows, title="Line Flow Magnitudes", xlabel="Line Number", ylabel="Active Power Flow ($units p.u.)", legend=false)
-# # note: the line flows are in per unit
-# # save the Plot
-# savefig(joinpath(save_folder,"line_flows_$network.png"))
-
-# # PLot the line flows and line limits on the same Plot
-# line_limits = []
-# for (i,branch) in ref[:branch]
-#     push!(line_limits,branch["rate_a"])
-# end
-# bar(line_names, line_flows, title="Line Flows and Limits", xlabel="Line Number", ylabel="Active Power Flow ($units p.u.)",label = "line_flows", legend=false)
-# plot!(line_names, line_limits, line=(:dash), title="Line Flows and Limits", xlabel="Line Number", ylabel="Active Power Flow ($units)", label = "line limits", legend=true)
-# # note: the line flows and limits are in per unit
-# # save the Plot
-# savefig(joinpath(save_folder,"line_flows_and_limits_$network.png"))
-
-# #powerplot(data)
 
 ######## 
 #AW updates 9/13/2024
