@@ -29,7 +29,6 @@ using LinearAlgebra
 using Printf
 using JLD2
 include("index.jl")
-
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
@@ -73,27 +72,26 @@ n_scenarios = 16  # 2^4 = 16 combinations of 4-bit boolean flags
 scenarios = ["ls_obj", "ls_fair_obj_1","ls_fair_obj_2"]#["ls_obj","ls_fair_obj_1","ls_fair_obj_2"]#"ls_fair_constr"]
 # Now, generate a 2D matrix of boolean flags for the tests
 # Each row represents a test, and columns represent the scenarios
- boolean_flags = Bool[true false false; true true false; true false  true]
+boolean_flags = Bool[true false false; true true false; true false  true]
 
 #println("\nBoolean flags for each test (10x16 matrix):")
 #println(boolean_flags)
 
 # Define the cost of load shedding
-# Add the cost of the varying the loads (AW added 9/19/2024)
-#c_load_vary = LinRange(2500, 6000, 50)
-c_load_vary = 2000#LinRange(10, 1E10, 2)
-   # Assume the cost of varying the load is the same as the cost of generating power
+c_load_vary = 2e3#LinRange(200, 2000, 2), 200 same as gen cost so shed load, 2000 too high no load shed
+# Assume the cost of varying the load is the same as the cost of generaxting power
 
 # Define the cost of fairness in load shedding 
-c_fair = LinRange(1000, 1E6, 2)
+c_fair = LinRange(1, 1E2, 2)#*1e2
 
 # Define a parameter to scale the load
 # Increasing will create an undervoltage problem
-scale_load = 1.0
+scale_load = 10.0
 scale_gen = scale_load
 
 # Define the threshold for the energy burden, aka the energy poverty threshold
 eb_threshold = 0.06 # 6% of the average load
+dlmp_base = rand(0.5:0.01:1.5, length(data["load"]))*.2 #.2 $/kWh
 
 # Add zeros to turn linear objective functions into quadratic ones
 # so that additional parameter checks are not required
@@ -152,6 +150,9 @@ max_load = scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
 min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
 p_load = model.ext[:variables][:p_load] = @variable(model, min_load <= p_load[i in keys(ref[:load])] <= max_load)
 
+for i in keys(ref[:load])
+    @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
+end
 for (l,dcline) in ref[:dcline]
     f_idx = (l, dcline["f_bus"], dcline["t_bus"])
     t_idx = (l, dcline["t_bus"], dcline["f_bus"])
@@ -173,11 +174,13 @@ model.ext[:constraints] = Dict()
 model.ext[:constraints][:nodal_active_power_balance] = []
 # Fix the voltage angle to zero at the reference bus
 for (i,bus) in ref[:ref_buses]
-   model.ext[:constraints][:va_i] = @constraint(model, va[i] == 0)
+model.ext[:constraints][:va_i] = @constraint(model, va[i] == 0)
 end
 
 # Add the energy burden constraint
-model.ext[:variables][:energy_burdens] = @variable(model, eb[i in keys(ref[:load])]>=0)
+# model.ext[:variables][:energy_burdens] = @variable(model, eb[i in keys(ref[:load])]>=0)
+# model.ext[:constraints][:energy_burden] = @constraint(model, eb .<= eb_threshold)
+# model.ext[:constraints][:energy_burden] = @constraint(model, eb .== [load["pd"] for (i,load) in ref[:load]]./dlmp_base)
 
 # Nodal power balance constraints
 for (i,bus) in ref[:bus]
@@ -336,6 +339,7 @@ end
 sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] + dcline["cost"][3] for (i,dcline) in ref[:dcline])
 )
 
+@expression(model, load_shed_obj,sum(c_load_vary*(scale_load*load["pd"] - p_load[i]) for (i,load) in ref[:load]))
 ################################################################################################
 # 2. Conduct the experiments
 ################################################################################################
@@ -346,7 +350,7 @@ model.ext[:variables][:load_shedding_fairness] = @variable(model, c_ls_fair>=0.0
 # Loop through all the tests defined in the experimental setup
 #################################################################################################
 (r,c) = size(boolean_flags)
-
+total_percent_load_served = []
 for i in 1:r
     flags = boolean_flags[i,:]
     #println("Test $flags")
@@ -369,16 +373,16 @@ for i in 1:r
     # Determine which scenarios are active
     println("Scenarios: $scenarios")
     println("Active Test Scenarios: $(scenarios[true_flags])")
- 
+
     for cost_fair in c_fair
         #for cost_ls in c_load_vary
 
             # Minimize the cost of active power generation and cost of HVDC line usage
             # assumes costs are given as quadratic functions
             @objective(model, Min, acopf_obj
-                            + sum(c_load_vary*(p_load[i]-scale_load*load["pd"])^2 for (i,load) in ref[:load])
-                + fair_obj_1*cost_fair*sum((c_ls_fair-(p_load[i]/(scale_load*load["pd"])))^2 for (i,load) in ref[:load])
-                + fair_obj_2*cost_fair*sum(((p_load[i+1]/(scale_load*ref[:load][i+1]["pd"])) - (p_load[i]/(scale_load*ref[:load][i]["pd"])))^2 for i in 1:(length(ref[:load])-1))
+                            + load_shed_obj
+                #+ fair_obj_1*cost_fair*sum(abs(c_ls_fair-(p_load[i]/(scale_load*load["pd"]))) for (i,load) in ref[:load])
+                #+ fair_obj_2*cost_fair*sum(abs((p_load[i+1]/(scale_load*ref[:load][i+1]["pd"])) - (p_load[i]/(scale_load*ref[:load][i]["pd"]))) for i in 1:(length(ref[:load])-1))
             )
 
             ###############################################################################
@@ -441,11 +445,13 @@ for i in 1:r
             #print the average percentage of load served 
             println("The total percentage of load served is $((sum(load_served_amount_vec)/(total_ref_load))*100) %.")
 
+            #print the total load served
+            push!(total_percent_load_served, (sum(load_served_amount_vec)/(total_ref_load))*100)
 
             total_load = scale_load * sum([load["pd"] for (i,load) in ref[:load]])
             loadshed_percent_vec = []
             for (i,load) in ref[:load]
-                push!(loadshed_percent_vec, abs(value(p_load[i]) - scale_load*ref[:load][i]["pd"])/(scale_load*ref[:load][i]["pd"]))
+                push!(loadshed_percent_vec, abs(scale_load*ref[:load][i]["pd"] - value(p_load[i]) )/(scale_load*ref[:load][i]["pd"]))
             end
             
             # calculate the Gini coefficient for the load shedding
@@ -453,7 +459,7 @@ for i in 1:r
 
             # calculate the Jain index for the load shedding
             results[i][cost_fair][c_load_vary]["jain"] = jain(load_served_percent_per_node)
-                      
+                    
             #print the gini and jain index
             println("The Gini coefficient is $(results[i][cost_fair][c_load_vary]["gini"]).")
             println("The Jain index is $(results[i][cost_fair][c_load_vary]["jain"]).")
@@ -493,7 +499,7 @@ for i in 1:r
                 push!(line_names,"Line $i")
             end
             results[i][cost_fair][c_load_vary]["line_flow_percent"] = line_flow_percent
-                       
+                    
             results[i][cost_fair][c_load_vary]["im"] = im_vec
             # Save the current limits 
 
@@ -516,7 +522,7 @@ for i in 1:r
         k = c_load_vary
         ls_plt = plot()
             results = load("results_exp_$(i)_$(j).jld2", "results")
-           # println("Results: ", keys(results_df_test))
+        # println("Results: ", keys(results_df_test))
             ls_percent_per_node = results[i][j][c_load_vary]["ls_percent"]
             ls_plt = scatter(net_buses, ls_percent_per_node, title="Load Shed Percentages", xlabel="Bus Number", ylabel="Load Shed Costs (USD/MW)", legend=true, label=@sprintf("%.2f",j))
             println("Total Load Served Percentages: ", sum(results[i][j][c_load_vary]["ls_percent"]))
@@ -552,12 +558,13 @@ for i in 1:r
     using PlotlyJS
     index = 0
     for j in c_fair
+        results = load("results_exp_$(i)_$(j).jld2", "results")
         index+=1
-            heatmap_data[index,:] = results[i][j][c_load_vary]["lmp"] 
-            println("Heatmap Data: ", heatmap_data)
-            println(size(heatmap_data))
+            heatmap_data[index,:] = results[i][j][c_load_vary]["lmp"] / (-ref[:baseMVA])
+            #println("Heatmap Data: ", heatmap_data)
+            #println(size(heatmap_data))
     end
-    lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance Constraints", xlabel="Bus Number", ylabel="Fairness Cost", color=:viridis)
+    lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective $(scenarios[i])", xlabel="Bus Number", ylabel="Fairness Cost", yticks=(1:length(c_fair), c_fair), color=:viridis)
     savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$(naming_test_files)_$network.png"))
 
     # plot the percent loadshed per bus heatmap
@@ -565,13 +572,12 @@ for i in 1:r
     ls_heatmap_data = zeros(length(c_fair), length(net_buses)-1)
     index = 0
     for j in c_fair
+        results = load("results_exp_$(i)_$(j).jld2", "results")
         index+=1
         ls_heatmap_data[index,:] = results[i][j][c_load_vary]["ls_percent"]
     end
-    ls_heatmap = heatmap(ls_heatmap_data, title="Load Shed Percentages", xlabel="Bus Number", ylabel="Fairness Cost", color=:viridis)
+    ls_heatmap = heatmap(ls_heatmap_data, title="Load Served Percentages, Objective $(scenarios[i])", xlabel="Bus Number", ylabel="Fairness Cost",yticks=(1:length(c_fair), c_fair), color=:viridis)
     savefig(ls_heatmap, joinpath(save_folder, "percent_loadserved/percent_loadserved_heatmap_$(naming_test_files)_$network.png"))
-    #layout = Layout(;yaxis = attr(tickmode = "array", tickvals = [1, 2], ticktext = ["Group A", "Group B"]))
-    #plot([lmp_heatmap], layout)
 
     # Plot the Gini coefficient and Jain index
     # Assuming `results` is a nested dictionary like this:
@@ -596,31 +602,31 @@ for i in 1:r
     
     gini_plt = plot()
     gini_plt = scatter(y_values, z_gini_values, xlabel="Fairness Cost", ylabel="Gini Coefficient", 
-            title="Gini Coefficient vs Fairness Cost",
+            title="Gini Coefficient vs Fairness Cost, Objective $(scenarios[i])",
             marker=:circle, color=:blues, legend=false)
 
     jain_plt= plot()
     jain_plt = scatter(y_values, z_jain_values, xlabel="Fairness Cost", ylabel="Jain Index", 
-            title="Jain Index vs Fairness Cost",
+            title="Jain Index vs Fairness Cost, Objective $(scenarios[i])",
             marker=:circle, color=:reds, legend=false)
     # Save the plot
     savefig(gini_plt, joinpath(save_folder, "gini/gini_$(naming_test_files)_$network.png"))
-    savefig(jain_plt, joinpath(save_folder, "jain/jain_$(naming_test_files)_$network.png"))
-    # Alternatively, if you want a surface plot, you can use:
-    # plot(x_values, y_values, z_values, seriestype=:surface, xlabel="Load Shedding Cost", ylabel="Fairness Cost", zlabel="Gini Coefficient")
-    
+    savefig(jain_plt, joinpath(save_folder, "jain/jain_$(naming_test_files)_$network.png"))    
 end
 
-######## 
-#AW updates 9/13/2024
-# DCOPF version for sanity
-# Run DC power flow formulation
-# Get duals and solution to dcopf
-# sol = solve_dc_opf(file_name, Gurobi.Optimizer, setting = Dict("output"=>Dict("duals"=>true)))
-# @assert sol["solution"]["per_unit"] == true
-# @assert sol["termination_status"] == MOI.OPTIMAL
-# # Extract the LMPs for the active power balance constraints
-# λ_kcl_opt = [b["lam_kcl_r"] for (i,b) in sol["solution"]["bus"]]
+println("Total Percent Load Served: ", total_percent_load_served)
 
-# #For $/MWh, baseMVA = 100
-# lmp  = λ_kcl_opt/(-100)
+function lmp_calculation()
+    #calculate the LMPs
+    active_power_nodal_constraints = Dict(network_buses .=> model.ext[:constraints][:nodal_active_power_balance])
+    lmp_vec = []
+    bus_order = []
+    for (i,bus) in ref[:bus]
+        #divide the lmps by the baseMVA to get the lmps in $/MWh and then multiply by 1000 to get the lmps in $/kW
+        push!(lmp_vec,dual(active_power_nodal_constraints[i])/(ref[:baseMVA]*10^3))
+        push!(bus_order, bus["bus_i"])
+    end
+    return lmp_vec, bus_order, results
+end
+
+lmp_vec,bus_order = lmp_calculation()
