@@ -30,6 +30,7 @@ using Printf
 using JLD2
 using Statistics
 include("index.jl")
+include("pv_data/pv_gen_data_read.jl")
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
@@ -186,7 +187,9 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
         # Add the PV generation constraint
         dlmp_positive = -dlmp_base 
         @variable(model, pv_gen[i in keys(ref[:load])] >= 0)
-        @constraint(model, pv_gen[i in keys(ref[:load])] <= pv_gen_max)
+        for i in keys(ref[:load])
+            JuMP.set_upper_bound(pv_gen[i], pv_gen_max)
+        end
         @constraint(model, sum(([load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]]-[pv_gen[i]*ref[:baseMVA] for (i,load) in ref[:load]]).*dlmp_positive)/70000 <= eb_threshold)
         # for bus in keys(ref[:bus])
         #     if ref[:bus][bus]["type"] == 2
@@ -367,7 +370,15 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
                 end
             end
             basemva = ref[:baseMVA]
-    return lmp_vec_pf, bus_order,eb_out, loads, basemva
+            if pv_constraint_flag
+                pv_gen_out = []
+                for (i,load) in ref[:load]
+                    push!(pv_gen_out,value(pv_gen[i]))
+                end
+            else
+                pv_gen_out = 0
+            end
+    return lmp_vec_pf, bus_order,eb_out, loads, basemva, pv_gen_out
 end
 
 # save the iteration number and the mean of the lmps
@@ -443,6 +454,9 @@ lmp_results_daily_pv_gen = DataFrame(
 )
 lmp_vec = zeros(length(data["load"]))
 net_buses = keys(data["bus"])
+# the pv generation data is in 15 minute intervals, with the columns being the days and the rows being the 15 minute intervals
+pv_gen_data,pv_max,pv_gen_data_normed = read_pv_data()
+
 for d in 1:num_days
     for iteration in 1:int_per_day
         #run the opf with the load data associated with this time interval and this day
@@ -451,18 +465,18 @@ for d in 1:num_days
             data["load"][loads]["pd"] = data["load"][loads]["pd"]#data["load"][d][iteration]
         end
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
+        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
-            push!(lmp_results_minutes_base, (d, bus, dlmp[bus]))
+            push!(lmp_results_minutes_base, (d, bus, dlmp[bus]/-basemva))
         end
     end 
-    dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, 1)
+    dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, 1)
     for bus_id in keys(dlmp)
         lmp_results_filtered = filter(row -> row.Bus == bus_id, lmp_results_minutes_base)
         #println("LMP Results Filtered: ", lmp_results_filtered)
         result = sum(lmp_results_filtered[:,:LMP])/length(lmp_results_filtered[:,:LMP])
         # Display the result
-        push!(lmp_results_daily_base, (d, bus_id, result))
+        push!(lmp_results_daily_base, (d, bus_id, result/-basemva))
     end
 end 
 
@@ -470,19 +484,21 @@ end
 # Plot a heatmap for the lmps, buses, and fairness cost
 lmp_heatmap = heatmap()
 heatmap_data = zeros(num_days, length(net_buses))
-using PlotlyJS
+#using PlotlyJS
+gr()
 index = 0
 for i in num_days
-    for j in net_buses
+    #for j in net_buses
         lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_base)
         #index += 1
-        println("LMP Results Filtered: ", lmp_results_filtered[:,3])
-        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] ./ (-ref[:baseMVA])
+        #println("LMP Results Filtered: ", lmp_results_filtered[:,3])
+        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] 
         #println("Heatmap Data: ", heatmap_data)
         #println(size(heatmap_data))
-    end
+    #
 end
 lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
+#heatmap_save_location = joinpath(save_folder, "lmp/lmp_heatmap.png")
 savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap.png"))
 
 
@@ -492,16 +508,16 @@ pv_constraint_flag = true
 for d in 1:num_days
     for iteration in 1:int_per_day
         # time_steps = (d-1)*int_per_day + iteration
+
         #run the opf with the load data associated with this time interval and this day
         for loads in keys(data["load"])
             #println("Load: ", data["load"][loads]["pd"])
-            data["load"][loads]["pd"] = data["load"][loads]["pd"]#-pv_gen_data[loads][time_steps]
+            data["load"][loads]["pd"] = data["load"][loads]["pd"]*pv_gen_data_normed[d,iteration]
         end
-        #pv_gen_max = pv_gen_data[loads][time_steps]
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
+        dlmp,bus_order,eb, loads, basemva, pv_gen_opt = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
-            push!(lmp_results_daily_pv_gen, (d, bus, dlmp[bus]))
+            push!(lmp_results_daily_pv_gen, (d, bus, dlmp[bus]/-basemva))
         end
     end 
 end 
@@ -516,11 +532,11 @@ for i in num_days
     for j in net_buses
         lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_pv_gen)
         #index += 1
-        println("LMP Results Filtered: ", lmp_results_filtered[:,3])
-        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] ./ (-ref[:baseMVA])
+        #println("LMP Results Filtered: ", lmp_results_filtered[:,3])
+        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] 
         #println("Heatmap Data: ", heatmap_data)
         #println(size(heatmap_data))
     end
 end
 lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
-savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_heatmap.png"))
+savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_pv_heatmap.png"))
