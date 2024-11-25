@@ -86,7 +86,7 @@ eb_threshold = 0.06 # 6% of the average load
 # so that additional parameter checks are not required
 PowerModels.silence()
 
-function acopf_main(eb_constraint_flag, pv_constraint_flag, data, scale_load, scale_gen, eb_threshold, dlmp_base, c_load_vary, c_fair, date, save_folder, iteration_number)
+function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, scale_load, scale_gen, eb_threshold, dlmp_base, c_load_vary, c_fair, date, save_folder, iteration_number)
     PowerModels.standardize_cost_terms!(data, order=2)
 
     # Adds reasonable rate_a values to branches without them
@@ -186,6 +186,7 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, data, scale_load, sc
         # Add the PV generation constraint
         dlmp_positive = -dlmp_base 
         @variable(model, pv_gen[i in keys(ref[:load])] >= 0)
+        @constraint(model, pv_gen[i in keys(ref[:load])] <= pv_gen_max)
         @constraint(model, sum(([load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]]-[pv_gen[i]*ref[:baseMVA] for (i,load) in ref[:load]]).*dlmp_positive)/70000 <= eb_threshold)
         # for bus in keys(ref[:bus])
         #     if ref[:bus][bus]["type"] == 2
@@ -476,30 +477,50 @@ for i in num_days
         lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_base)
         #index += 1
         println("LMP Results Filtered: ", lmp_results_filtered[:,3])
-        heatmap_data[i,:] = lmp_results_filtered[:,3][1] ./ (-ref[:baseMVA])
+        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] ./ (-ref[:baseMVA])
         #println("Heatmap Data: ", heatmap_data)
         #println(size(heatmap_data))
     end
 end
-lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective $(scenarios[i])", xlabel="Bus Number", ylabel="Day", color=:viridis)
-savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$(naming_test_files)_$network.png"))
+lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
+savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap.png"))
 
 
-# insert the PV generation constraint into the problem and run againf
+# insert the PV generation constraint into the problem and run again
 #Re-run the opf with the new load data including the pv generation
 pv_constraint_flag = true
 for d in 1:num_days
     for iteration in 1:int_per_day
+        # time_steps = (d-1)*int_per_day + iteration
         #run the opf with the load data associated with this time interval and this day
         for loads in keys(data["load"])
             #println("Load: ", data["load"][loads]["pd"])
-            data["load"][loads]["pd"] = data["load"][loads]["pd"]#data["load"][d][iteration]
+            data["load"][loads]["pd"] = data["load"][loads]["pd"]#-pv_gen_data[loads][time_steps]
         end
+        #pv_gen_max = pv_gen_data[loads][time_steps]
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
+        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
             push!(lmp_results_daily_pv_gen, (d, bus, dlmp[bus]))
         end
     end 
 end 
 #println("Convergence achieved after ", iterations, " iterations.")
+
+# Plot a heatmap for the lmps, buses, and fairness cost; for the PV generation case
+lmp_pv_heatmap = heatmap()
+heatmap_data = zeros(num_days, length(net_buses))
+using PlotlyJS
+index = 0
+for i in num_days
+    for j in net_buses
+        lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_pv_gen)
+        #index += 1
+        println("LMP Results Filtered: ", lmp_results_filtered[:,3])
+        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] ./ (-ref[:baseMVA])
+        #println("Heatmap Data: ", heatmap_data)
+        #println(size(heatmap_data))
+    end
+end
+lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
+savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_heatmap.png"))
