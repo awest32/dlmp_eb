@@ -443,11 +443,18 @@ lmp_results_daily_base = DataFrame(
     LMP = Float64[],
 )
 lmp_results_minutes_base = DataFrame(
-    Interval = Int[],
+    Day = Int[],
+    Iteration = Int[],
     Bus = Int[],
-    LMP = Float64[],
+    LMP = Float64[]
 )
-lmp_results_daily_pv_gen = DataFrame(
+lmp_results_minutes_pv_constraint = DataFrame(
+    Day = Int[],
+    Iteration = Int[],
+    Bus = Int[],
+    LMP = Float64[]
+)
+lmp_results_daily_pv_constraint = DataFrame(
     Day = Int[],
     Bus = Int[],
     LMP = Float64[],
@@ -462,49 +469,54 @@ for d in 1:num_days
         #run the opf with the load data associated with this time interval and this day
         for loads in keys(data["load"])
             #println("Load: ", data["load"][loads]["pd"])
-            data["load"][loads]["pd"] = data["load"][loads]["pd"]#data["load"][d][iteration]
+            data["load"][loads]["pd"] = data["load"][loads]["pd"]*pv_gen_data_normed[d,iteration]
         end
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
         dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
-            push!(lmp_results_minutes_base, (d, bus, dlmp[bus]/-basemva))
+            push!(lmp_results_minutes_base, (d, iteration, bus, dlmp[bus]/-basemva))
         end
     end 
-    dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, 1)
-    for bus_id in keys(dlmp)
-        lmp_results_filtered = filter(row -> row.Bus == bus_id, lmp_results_minutes_base)
-        #println("LMP Results Filtered: ", lmp_results_filtered)
-        result = sum(lmp_results_filtered[:,:LMP])/length(lmp_results_filtered[:,:LMP])
-        # Display the result
-        push!(lmp_results_daily_base, (d, bus_id, result/-basemva))
-    end
+    # dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, 1)
+    # for bus_id in keys(dlmp)
+    #     lmp_results_filtered = filter(row -> row.Bus == bus_id, lmp_results_minutes_base)
+    #     #println("LMP Results Filtered: ", lmp_results_filtered)
+    #     result = sum(lmp_results_filtered[:,:LMP])/length(lmp_results_filtered[:,:LMP])
+    #     # Display the result
+    #     push!(lmp_results_daily_base, (d, bus_id, result/-basemva))
+    # end
+    #println("lmp results per time step: ", lmp_results_minutes_base)
 end 
 
 #create a heatmap of the lmps for each bus over the 7 days
 # Plot a heatmap for the lmps, buses, and fairness cost
 lmp_heatmap = heatmap()
-heatmap_data = zeros(num_days, length(net_buses))
+heatmap_data = transpose(zeros(int_per_day, length(net_buses)))
 #using PlotlyJS
 gr()
 index = 0
-for i in num_days
-    #for j in net_buses
-        lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_base)
-        #index += 1
-        #println("LMP Results Filtered: ", lmp_results_filtered[:,3])
-        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] 
-        #println("Heatmap Data: ", heatmap_data)
-        #println(size(heatmap_data))
-    #
+for day in 1:num_days
+    lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_base)
+    #println("LMP Results Filtered Daily: ", lmp_results_filtered_daily)
+    for i in 1:int_per_day
+        #for j in net_buses
+            lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
+            #index += 1
+            #println("LMP Results Filtered: ", lmp_results_filtered[:,:LMP])
+            heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
+            #println("Heatmap Data: ", heatmap_data)
+            #println(size(heatmap_data))
+        #
+    end
+    lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
+    #heatmap_save_location = joinpath(save_folder, "lmp/lmp_heatmap.png")
+    savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$day.png"))
 end
-lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
-#heatmap_save_location = joinpath(save_folder, "lmp/lmp_heatmap.png")
-savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap.png"))
-
 
 # insert the PV generation constraint into the problem and run again
 #Re-run the opf with the new load data including the pv generation
 pv_constraint_flag = true
+size_pv = []
 for d in 1:num_days
     for iteration in 1:int_per_day
         # time_steps = (d-1)*int_per_day + iteration
@@ -517,26 +529,30 @@ for d in 1:num_days
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
         dlmp,bus_order,eb, loads, basemva, pv_gen_opt = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
-            push!(lmp_results_daily_pv_gen, (d, bus, dlmp[bus]/-basemva))
+            push!(lmp_results_minutes_pv_constraint, (d, iteration, bus, dlmp[bus]/-basemva))
         end
+        push!(size_pv,pv_gen_opt)
     end 
+
 end 
 #println("Convergence achieved after ", iterations, " iterations.")
 
 # Plot a heatmap for the lmps, buses, and fairness cost; for the PV generation case
 lmp_pv_heatmap = heatmap()
-heatmap_data = zeros(num_days, length(net_buses))
-using PlotlyJS
-index = 0
-for i in num_days
-    for j in net_buses
-        lmp_results_filtered = filter(row -> row.Day == i, lmp_results_daily_pv_gen)
-        #index += 1
-        #println("LMP Results Filtered: ", lmp_results_filtered[:,3])
-        heatmap_data[i,:] .= lmp_results_filtered[:,3][1] 
-        #println("Heatmap Data: ", heatmap_data)
-        #println(size(heatmap_data))
+heatmap_data = zeros(length(net_buses), int_per_day)
+for day in 1:num_days
+    lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_pv_constraint)
+    #println("LMP Results Filtered Daily: ", lmp_results_filtered_daily)
+    for i in 1:int_per_day
+        #for j in net_buses
+            lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
+            #index += 1
+            #println("LMP Results Filtered: ", lmp_results_filtered[:,:LMP])
+            heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
+            #println("Heatmap Data: ", heatmap_data)
+            #println(size(heatmap_data))
+        #
     end
+    lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
+    savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_pv_heatmap_$day.png"))
 end
-lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", xlabel="Bus Number", ylabel="Day", color=:viridis)
-savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_pv_heatmap.png"))
