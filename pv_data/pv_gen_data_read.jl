@@ -8,7 +8,7 @@ using Printf
 using JLD2
 using Statistics
 
-function read_pv_data()
+function read_load_data()
     current_dir = @__DIR__
     # Read in the pv generation data for
     # The columns are the days (238)

@@ -30,7 +30,7 @@ using Printf
 using JLD2
 using Statistics
 include("index.jl")
-include("pv_data/pv_gen_data_read.jl")
+include("pv_data/data_inputs.jl")
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
@@ -87,7 +87,7 @@ eb_threshold = 0.06 # 6% of the average load
 # so that additional parameter checks are not required
 PowerModels.silence()
 
-function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, scale_load, scale_gen, eb_threshold, dlmp_base, c_load_vary, c_fair, date, save_folder, iteration_number)
+function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, dlmp_base, c_load_vary, c_fair, date, save_folder, iteration_number)
     PowerModels.standardize_cost_terms!(data, order=2)
 
     # Adds reasonable rate_a values to branches without them
@@ -139,9 +139,9 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
 
     # Add a variable to represent the cost of active power load at each bus (AW added 9/17/2024)
     # Find max load out of all of the loads
-    max_load = scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
+    max_load =  scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
     min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
-    p_load = model.ext[:variables][:p_load] = @variable(model, min_load <= p_load[i in keys(ref[:load])] <= max_load)
+    p_load = model.ext[:variables][:p_load] = @variable(model, min_load <=p_load[i in keys(ref[:load])] <= max_load)
 
     for i in keys(ref[:load])
         @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
@@ -170,35 +170,14 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
     model.ext[:constraints][:va_i] = @constraint(model, va[i] == 0)
     end
 
-    if eb_constraint_flag
-        # Add the energy burden constraint
-        #model.ext[:variables][:energy_burdens] = @variable(model, eb[i in keys(ref[:load])]>=0)
-        # Additional parameter to ensure the dlmp input into the eb constraint is non-negative
-        dlmp_positive = -dlmp_base 
-        eb = ([load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]].*dlmp_positive)./(3000000/(365*24))
-        #@expression(model, eb .= ([load["pd"] for (i,load) in ref[:load]].*dlmp_base)./30000)
-        model.ext[:constraints][:energy_burden] = @constraint(model, eb .<= eb_threshold)
-        println("Length of energy burden vector: ", length(eb))
-        println("Length of load vector: ", length([load["pd"] for (i,load) in ref[:load]]))
-        println("Length of dlmp_base vector: ", length(dlmp_base))
-    end 
-
     if pv_constraint_flag
         # Add the PV generation constraint
         dlmp_positive = -dlmp_base 
         @variable(model, pv_gen[i in keys(ref[:load])] >= 0)
         for i in keys(ref[:load])
-            JuMP.set_upper_bound(pv_gen[i], pv_gen_max)
+            JuMP.set_upper_bound(pv_gen[i],scale_load*ref[:load][i]["pd"] )
         end
-        @constraint(model, sum(([load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]]-[pv_gen[i]*ref[:baseMVA] for (i,load) in ref[:load]]).*dlmp_positive)/70000 <= eb_threshold)
-        # for bus in keys(ref[:bus])
-        #     if ref[:bus][bus]["type"] == 2
-        #         pv_size = 0.1
-        #         pv_gen_match = ref[:bus][bus]["pd"]*pv_size
-        #         ref[:bus][bus]["pd"] = ref[:bus][bus]["pd"] - pv_gen_match
-        #         ref[:gen][bus]["pg"] = ref[:gen][bus]["pg"] + pv_gen_match
-        #     end
-        # end
+        @constraint(model, sum(([scale_load*load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]]-[pv_gen_normed*pv_gen[i]*ref[:baseMVA] for (i,load) in ref[:load]]).*dlmp_positive)/70000 <= eb_threshold)
     end
     # Nodal power balance constraints
     for (i,bus) in ref[:bus]
@@ -223,7 +202,7 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
             sum(q[a] for a in ref[:bus_arcs][i]) +                  # sum of reactive power flow on lines from bus i +
             sum(q_dc[a_dc] for a_dc in ref[:bus_arcs_dc][i]) ==     # sum of reactive power flow on HVDC lines from bus i =
             sum(qg[g] for g in ref[:bus_gens][i]) -                 # sum of reactive power generation at bus i -
-            sum(load["qd"] for load in bus_loads) +                 # sum of reactive load consumption at bus i -
+            sum(scale_load*load["qd"] for load in bus_loads) +                 # sum of reactive load consumption at bus i -
             sum(shunt["bs"] for shunt in bus_shunts)*vm[i]^2        # sum of reactive shunt element injections at bus i
         )
 
@@ -358,6 +337,10 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
                     push!(lmp_vec_pf,dual(active_power_nodal_constraints[i]))
                 end
             end
+            for (i,load) in ref[:load]
+                push!(loads, value(p_load[i]))
+                #push!(p_load_out, value(p_load[i]))
+            end
             save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref[:baseMVA]))
             if eb_constraint_flag
                 for (i,load) in ref[:load]
@@ -366,7 +349,6 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
                     else 
                         push!(eb_out, value(eb[i]))
                     end
-                    push!(loads, load["pd"]*ref[:baseMVA])
                 end
             end
             basemva = ref[:baseMVA]
@@ -378,7 +360,7 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_max, data, sc
             else
                 pv_gen_out = 0
             end
-    return lmp_vec_pf, bus_order,eb_out, loads, basemva, pv_gen_out
+    return lmp_vec_pf, bus_order, loads, basemva, pv_gen_out,eb_out
 end
 
 # save the iteration number and the mean of the lmps
@@ -388,44 +370,6 @@ lmp_mean = []
 lmp_results = []
 tol = 100.0  # Set initial tolerance value to a high number
 global dlmp_base = ones(length(data["load"]))*.5
-#global lmp_vec = dlmp_base
-# Loop until the maximum difference between iterations is below the tolerance
-# for iteration in 1:3
-#     #maximum(abs.(tol)) >= 0.001
-#     println("Iteration: ", iteration)
-#     # Call acopf_main based on the iteration count to initialize or update lmp_vec
-#     if iteration == 1
-#         eb_constraint_flag = false
-#         global lmp_vec = zeros(length(data["load"]))
-#     else
-#         eb_constraint_flag = true
-#     end
-#     # Calculate the tolerance between iterations and update if above threshold
-#     dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
-
-#     #     global lmp_vec = acopf_main(eb_constraint_flag, data, scale_load, scale_gen, eb_threshold, dlmp, c_load_vary, c_fair, date, save_folder)
-#     # end
-#         #println("The LMP_vec: ", lmp_vec)
-#     tolerance_check = abs.(lmp_vec) .- abs.(dlmp)
-#     tol = abs.(tolerance_check)
-#     push!(lmp_mean, mean(lmp_vec))
-#     push!(tol_check, tolerance_check)
-#     push!(lmp_results, lmp_vec)
-
-#     # Update dlmp for the next iteration
-#     #println("Current DLMPs: ", dlmp)
-#     #println("The LMP_vec: ", lmp_vec)
-#     #println("Tolerance Check: ", tolerance_check)
-#     lmp_vec = dlmp
-#     #println("Tolerance: ", tol_check)
-#     println("Energy Burden: ", eb)
-#     #println("Loads: ", loads)
-#     #println("Base Power: ", basemva)
-#     # Increment iteration counter
-#     # if maximum(abs.(tol)) .< 0.01
-#     #     break
-#     # end
-# end
 
 #run for 7  days in 15 minute intervals for base case with new load data
 # one day is 1440 minutes
@@ -437,11 +381,7 @@ time_intervals = 15 #minutes
 int_per_day = 96 #intervals per day
 eb_constraint_flag = false
 pv_constraint_flag = false
-lmp_results_daily_base = DataFrame(
-    Day = Int[],
-    Bus = Int[],
-    LMP = Float64[],
-)
+
 lmp_results_minutes_base = DataFrame(
     Day = Int[],
     Iteration = Int[],
@@ -454,62 +394,40 @@ lmp_results_minutes_pv_constraint = DataFrame(
     Bus = Int[],
     LMP = Float64[]
 )
-lmp_results_daily_pv_constraint = DataFrame(
-    Day = Int[],
-    Bus = Int[],
-    LMP = Float64[],
-)
-lmp_vec = zeros(length(data["load"]))
+
 net_buses = keys(data["bus"])
 # the pv generation data is in 15 minute intervals, with the columns being the days and the rows being the 15 minute intervals
-pv_gen_data,pv_max,pv_gen_data_normed = read_pv_data()
-
+load_data,load_max,load_data_normed = read_load_data()
+pv_gen_normed = 0
 for d in 1:num_days
+    lmp_vec = zeros(length(data["load"]))
     for iteration in 1:int_per_day
         #run the opf with the load data associated with this time interval and this day
         for loads in keys(data["load"])
-            #println("Load: ", data["load"][loads]["pd"])
-            data["load"][loads]["pd"] = data["load"][loads]["pd"]*pv_gen_data_normed[d,iteration]
+            scale_load = load_data_normed[d,iteration]
         end
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
+        dlmp,bus_order, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
             push!(lmp_results_minutes_base, (d, iteration, bus, dlmp[bus]/-basemva))
         end
+        lmp_vec = dlmp
     end 
-    # dlmp,bus_order,eb, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, 1)
-    # for bus_id in keys(dlmp)
-    #     lmp_results_filtered = filter(row -> row.Bus == bus_id, lmp_results_minutes_base)
-    #     #println("LMP Results Filtered: ", lmp_results_filtered)
-    #     result = sum(lmp_results_filtered[:,:LMP])/length(lmp_results_filtered[:,:LMP])
-    #     # Display the result
-    #     push!(lmp_results_daily_base, (d, bus_id, result/-basemva))
-    # end
-    #println("lmp results per time step: ", lmp_results_minutes_base)
 end 
 
-#create a heatmap of the lmps for each bus over the 7 days
+# create a heatmap of the lmps for each bus over the 7 days
 # Plot a heatmap for the lmps, buses, and fairness cost
 lmp_heatmap = heatmap()
-heatmap_data = transpose(zeros(int_per_day, length(net_buses)))
-#using PlotlyJS
+heatmap_data = zeros(length(net_buses),int_per_day)
 gr()
 index = 0
 for day in 1:num_days
     lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_base)
-    #println("LMP Results Filtered Daily: ", lmp_results_filtered_daily)
     for i in 1:int_per_day
-        #for j in net_buses
             lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
-            #index += 1
-            #println("LMP Results Filtered: ", lmp_results_filtered[:,:LMP])
             heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
-            #println("Heatmap Data: ", heatmap_data)
-            #println(size(heatmap_data))
-        #
     end
     lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
-    #heatmap_save_location = joinpath(save_folder, "lmp/lmp_heatmap.png")
     savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$day.png"))
 end
 
@@ -517,41 +435,34 @@ end
 #Re-run the opf with the new load data including the pv generation
 pv_constraint_flag = true
 size_pv = []
+size_pload = []
 for d in 1:num_days
+    lmp_vec = zeros(length(data["load"]))
     for iteration in 1:int_per_day
-        # time_steps = (d-1)*int_per_day + iteration
-
         #run the opf with the load data associated with this time interval and this day
         for loads in keys(data["load"])
-            #println("Load: ", data["load"][loads]["pd"])
-            data["load"][loads]["pd"] = data["load"][loads]["pd"]*pv_gen_data_normed[d,iteration]
+            scale_load = load_data_normed[d,iteration]
         end
         # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order,eb, loads, basemva, pv_gen_opt = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_max, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
+        dlmp,bus_order, loads, basemva, pv_gen_opt = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
         for bus in keys(dlmp)
             push!(lmp_results_minutes_pv_constraint, (d, iteration, bus, dlmp[bus]/-basemva))
         end
+        lmp_vec = dlmp
         push!(size_pv,pv_gen_opt)
+        push!(size_pload,loads)
     end 
 
 end 
-#println("Convergence achieved after ", iterations, " iterations.")
 
 # Plot a heatmap for the lmps, buses, and fairness cost; for the PV generation case
 lmp_pv_heatmap = heatmap()
 heatmap_data = zeros(length(net_buses), int_per_day)
 for day in 1:num_days
     lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_pv_constraint)
-    #println("LMP Results Filtered Daily: ", lmp_results_filtered_daily)
     for i in 1:int_per_day
-        #for j in net_buses
-            lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
-            #index += 1
-            #println("LMP Results Filtered: ", lmp_results_filtered[:,:LMP])
-            heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
-            #println("Heatmap Data: ", heatmap_data)
-            #println(size(heatmap_data))
-        #
+        lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
+        heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
     end
     lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
     savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_pv_heatmap_$day.png"))
