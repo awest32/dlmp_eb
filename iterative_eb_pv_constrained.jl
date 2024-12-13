@@ -1,21 +1,3 @@
-#### AC Optimal Power Flow ####
-
-# This file provides a pedagogical example of modeling the AC Optimal Power
-# Flow problem using the Julia Mathematical Programming package (JuMP) and the
-# PowerModels package for data parsing.
-
-# This file can be run by calling `include("ac-opf.jl")` from the Julia REPL or
-# by calling `julia ac-opf.jl` in Julia v1.
-
-# Developed by Line Roald (@lroald) and Carleton Coffrin (@ccoffrin)
-
-
-###############################################################################
-# 0. Initialization
-###############################################################################
-
-# Load Julia Packages
-#--------------------
 using PowerModels
 using Ipopt
 using JuMP
@@ -29,8 +11,8 @@ using LinearAlgebra
 using Printf
 using JLD2
 using Statistics
-include("index.jl")
-include("pv_data/data_inputs.jl")
+#include("../index.jl")
+include("../pv_data/data_inputs.jl")
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
@@ -78,12 +60,10 @@ scale_gen = scale_load
 
 # Define the threshold for the energy burden, aka the energy poverty threshold
 eb_threshold = 0.06 # 6% of the average load
-#dlmp_base = ones(length(ref[:load]))#rand(0.5:0.01:1.5, length(data["load"]))*.2 #.2 $/kWh
-# Add zeros to turn linear objective functions into quadratic ones
-# so that additional parameter checks are not required
+
 PowerModels.silence()
 
-function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, dlmp_base, c_load_vary, c_fair, date, save_folder, iteration_number)
+function acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save_folder, iteration_number)
     PowerModels.standardize_cost_terms!(data, order=2)
 
     # Adds reasonable rate_a values to branches without them
@@ -166,15 +146,6 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
     model.ext[:constraints][:va_i] = @constraint(model, va[i] == 0)
     end
 
-    if pv_constraint_flag
-        # Add the PV generation constraint
-        dlmp_positive = -dlmp_base 
-        @variable(model, pv_gen[i in keys(ref[:load])] >= 0)
-        for i in keys(ref[:load])
-            JuMP.set_upper_bound(pv_gen[i],scale_load*ref[:load][i]["pd"] )
-        end
-        @constraint(model, sum(([scale_load*load["pd"]*ref[:baseMVA] for (i,load) in ref[:load]]-[pv_gen_normed*pv_gen[i]*ref[:baseMVA] for (i,load) in ref[:load]]).*dlmp_positive)/70000 <= eb_threshold)
-    end
     # Nodal power balance constraints
     for (i,bus) in ref[:bus]
         # Build a list of the loads and shunt elements connected to the bus i
@@ -310,154 +281,103 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
             @objective(model, Min, acopf_obj
                             + load_shed_obj)
 
-            ###############################################################################
-            # 3. Solve the Optimal Power Flow Model and Review the Results
-            ###############################################################################
-
-            # Solve the optimization problem
-            optimize!(model)
-
-            # Check that the solver terminated without an error
-            println("The solver termination status is $(termination_status(model))")
-            network_buses = keys(ref[:bus])
-
-            # save the active power lmps
-            active_power_nodal_constraints = Dict(network_buses .=> model.ext[:constraints][:nodal_active_power_balance])
-            lmp_vec_pf = []
-            bus_order = []
-            eb_out = []
-            loads = []
-            for (i,bus) in ref[:bus]
-                if i != 1
-                    push!(bus_order, i)
-                    push!(lmp_vec_pf,dual(active_power_nodal_constraints[i]))
-                end
-            end
-            for (i,load) in ref[:load]
-                push!(loads, value(p_load[i]))
-                #push!(p_load_out, value(p_load[i]))
-            end
-            save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref[:baseMVA]))
-            if eb_constraint_flag
-                for (i,load) in ref[:load]
-                    if iteration_number == 1
-                        push!(eb_out, 1)
-                    else 
-                        push!(eb_out, value(eb[i]))
-                    end
-                end
-            end
-            basemva = ref[:baseMVA]
-            if pv_constraint_flag
-                pv_gen_out = []
-                for (i,load) in ref[:load]
-                    push!(pv_gen_out,value(pv_gen[i]))
-                end
-            else
-                pv_gen_out = 0
-            end
-    return lmp_vec_pf, bus_order, loads, basemva, pv_gen_out,eb_out
+        return model, ref[:load], ref[:baseMVA], ref[:bus]
 end
-
-# save the iteration number and the mean of the lmps
-# Initialize variables
-tol_check = []
-lmp_mean = []
-lmp_results = []
-tol = 100.0  # Set initial tolerance value to a high number
-global dlmp_base = ones(length(data["load"]))*.5
-
-#run for 7  days in 15 minute intervals for base case with new load data
-# one day is 1440 minutes
-# 7 days is 10080 minutes
-# 15 minute intervals is 96 intervals per day
-# 96*7 = 672 intervals
-num_days = 2#7
-time_intervals = 15 #minutes
-int_per_day = 96 #intervals per day
-eb_constraint_flag = false
-pv_constraint_flag = false
-
-lmp_results_minutes_base = DataFrame(
-    Day = Int[],
-    Iteration = Int[],
-    Bus = Int[],
-    LMP = Float64[]
-)
-lmp_results_minutes_pv_constraint = DataFrame(
-    Day = Int[],
-    Iteration = Int[],
-    Bus = Int[],
-    LMP = Float64[]
-)
-
-net_buses = keys(data["bus"])
-# the pv generation data is in 15 minute intervals, with the columns being the days and the rows being the 15 minute intervals
-current_dir = @__DIR__
+eb_constraint_flag = true
+pv_constraint_flag = true
+date = Dates.today()
+iteration_number = 1
+current_dir = pwd()
 load_data_name = current_dir*"/pv_data/Pload_p.csv"
 pv_data_name = current_dir*"/pv_data/pv_gen.csv"
 ghi_data_name = current_dir*"/pv_data/ghi.csv"
 load_data_normed = read_load_data(load_data_name)
-pv_gen_normed, ghi_data_normed = read_pv_data(pv_data_name, ghi_data_name)
-for d in 1:num_days
-    lmp_vec = zeros(length(data["load"]))
-    for iteration in 1:int_per_day
-        #run the opf with the load data associated with this time interval and this day
-        for loads in keys(data["load"])
-            scale_load = load_data_normed[d,iteration]
-        end
-        # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order, loads, basemva = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
-        for bus in keys(dlmp)
-            push!(lmp_results_minutes_base, (d, iteration, bus, dlmp[bus]/-basemva))
-        end
-        lmp_vec = dlmp
-    end 
-end 
+pv_data_normed, ghi_data_normed = read_pv_data(pv_data_name, ghi_data_name)
+scale_pv = pv_data_normed.*ghi_data_normed
+acopf_model, ref_load, ref_baseMVA, ref_bus  = acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save_folder, iteration_number)
 
-# create a heatmap of the lmps for each bus over the 7 days
-# Plot a heatmap for the lmps, buses, and fairness cost
-lmp_heatmap = heatmap()
-heatmap_data = zeros(length(net_buses),int_per_day)
-gr()
-index = 0
-for day in 1:num_days
-    lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_base)
-    for i in 1:int_per_day
-            lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
-            heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
+function run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+    # Run the ACOPF model
+    # -------------------
+    # Define the solver
+    set_optimizer(acopf_model, Ipopt.Optimizer)
+    # Set the solver options
+    set_optimizer_attributes(acopf_model, "print_level" => 0)
+    # Solve the optimization problem
+    optimize!(acopf_model)
+    # Extract the results
+    # -------------------
+    # Extract the lmps
+    network_buses = keys(ref_bus)
+    active_power_nodal_constraints = Dict(network_buses .=> acopf_model.ext[:constraints][:nodal_active_power_balance])
+    lmp_vec_pf = []
+    bus_order = []
+    eb_out = []
+    pv_out = []
+    loads = []
+    for (i,bus) in ref_bus
+        if i != 1
+            push!(bus_order, i)
+            push!(lmp_vec_pf,dual(active_power_nodal_constraints[i]))
+        end
     end
-    lmp_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
-    savefig(lmp_heatmap, joinpath(save_folder, "lmp/lmp_heatmap_$day.png"))
+    for (i,load) in ref_load
+        push!(loads, load["pd"]*scale_load)
+        #push!(p_load_out, value(p_load[i]))
+    end
+    save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref_baseMVA))
+    # if eb_constraint_flag
+    #     for (i,load) in ref[:load]
+    #         if iteration_number == 1
+    #             push!(eb_out, 1)
+    #         else 
+    #             push!(eb_out, value(eb[i]))
+    #         end
+    #     end
+    # end
+    # basemva = ref[:baseMVA]
+    # if pv_constraint_flag
+    #     for (i,load) in ref[:load]
+    #         push!(pv_out,value(pv_gen[i]))
+    #     end
+    # else
+    #     pv_gen_out = 0
+    # end
+    return lmp_vec_pf, bus_order, loads
+end
+time_steps = 2
+days = 2
+dlmp_base, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+
+@variable(acopf_model, x_pv[i in keys(ref_load), 1:days, 1:time_steps] >= 0)
+dlmp_positive = -dlmp_base 
+
+for day in 1:days
+    for tstep in 1:time_steps
+        # Add the PV generation constraint
+        for i in keys(ref_load)
+            JuMP.set_upper_bound(x_pv[i,day,tstep],scale_load*ref_load[i]["pd"] )
+        end
+        @constraint(acopf_model, sum(([scale_load*load["pd"]*ref_baseMVA for (i,load) in ref_load].-[scale_pv[day*tstep]*x_pv[i,day,tstep]*ref_baseMVA for (i,load) in ref_load]).*dlmp_positive)/70000 <= eb_threshold)
+    end
 end
 
-# insert the PV generation constraint into the problem and run again
-#Re-run the opf with the new load data including the pv generation
-pv_constraint_flag = true
-size_pv = []
-size_pload = []
-for d in 1:num_days
-    lmp_vec = zeros(length(data["load"]))
-    for iteration in 1:int_per_day
-        #run the opf with the load data associated with this time interval and this day
-        for loads in keys(data["load"])
-            scale_load = load_data_normed[d,iteration]
+lmp_vec_pv, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+#caculate the energy burden per bus per day and time step
+eb = DataFrame(bus=Int[], day=Int[], tstep=Int[], eb=Float64[])
+for (i,b) in ref_load
+    println("Bus: ", b["index"]) 
+    for d in 1:days
+        for t in 1:time_steps
+            eb_day = (p_load[i]-value(x_pv[b["index"],d,t]))*dlmp_positive[i]/70000
+            push!(eb,[b["index"],d,t,eb_day])
         end
-        # Call acopf_main based on the iteration count to initialize or update lmp_vec
-        dlmp,bus_order, loads, basemva, pv_gen_opt = acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data, scale_load, scale_gen, eb_threshold, lmp_vec, c_load_vary, c_fair, date, save_folder, iteration)
-        for bus in keys(dlmp)
-            push!(lmp_results_minutes_pv_constraint, (d, iteration, bus, dlmp[bus]/-basemva))
-        end
-        lmp_vec = dlmp
-        push!(size_pv,pv_gen_opt)
-        push!(size_pload,loads)
-    end 
-
-end 
-
+    end
+end
 # Plot a heatmap for the lmps, buses, and fairness cost; for the PV generation case
 lmp_pv_heatmap = heatmap()
-heatmap_data = zeros(length(net_buses), int_per_day)
+int_per_day = time_steps
+heatmap_data = zeros(length(bus_order), int_per_day)
 for day in 1:num_days
     lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_pv_constraint)
     for i in 1:int_per_day
