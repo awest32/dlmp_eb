@@ -12,7 +12,7 @@ using Printf
 using JLD2
 using Statistics
 #include("../index.jl")
-include("../pv_data/data_inputs.jl")
+include("pv_data/data_inputs.jl")
 # Load System Data
 # ----------------
 powermodels_path = joinpath(dirname(pathof(PowerModels)), "../")
@@ -117,11 +117,11 @@ function acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save
     # Find max load out of all of the loads
     max_load =  scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
     min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
-    p_load = model.ext[:variables][:p_load] = @variable(model, min_load <=p_load[i in keys(ref[:load])] <= max_load)
+    #p_load = model.ext[:variables][:p_load] = @variable(model, min_load <=p_load[i in keys(ref[:load])] <= max_load)
 
-    for i in keys(ref[:load])
-        @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
-    end
+    # for i in keys(ref[:load])
+    #     @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
+    # end
     for (l,dcline) in ref[:dcline]
         f_idx = (l, dcline["f_bus"], dcline["t_bus"])
         t_idx = (l, dcline["t_bus"], dcline["f_bus"])
@@ -155,12 +155,14 @@ function acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save
 
         # Active power balance at node i
         # AW updated to extract nodal active power balance constraints in a vector
+
+        # include the pv in the power balance as positive power
         push!(model.ext[:constraints][:nodal_active_power_balance],@constraint(model,
             sum(p[a] for a in ref[:bus_arcs][i]) +                  # sum of active power flow on lines from bus i +
             sum(p_dc[a_dc] for a_dc in ref[:bus_arcs_dc][i]) ==     # sum of active power flow on HVDC lines from bus i =
             sum(pg[g] for g in ref[:bus_gens][i]) -                 # sum of active power generation at bus i -
-            #sum(load["pd"] for load in bus_loads) -                 # sum of active load consumption at bus i -
-            sum(p_load[p_l] for p_l in ref[:bus_loads][i]) -                 # sum of active load consumption at bus i -
+            sum(load["pd"] for load in bus_loads) -                 # sum of active load consumption at bus i -
+            #sum(p_load[p_l] for p_l in ref[:bus_loads][i]) -                 # sum of active load consumption at bus i -
             sum(shunt["gs"] for shunt in bus_shunts)*vm[i]^2        # sum of active shunt element injections at bus i
         ))
 
@@ -264,12 +266,12 @@ function acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save
     sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] + dcline["cost"][3] for (i,dcline) in ref[:dcline])
     )
 
-    @expression(model, load_shed_obj,sum(c_load_vary*(scale_load*load["pd"] - p_load[i]) for (i,load) in ref[:load]))
+   # @expression(model, load_shed_obj,sum(c_load_vary*(scale_load*load["pd"] - p_load[i]) for (i,load) in ref[:load]))
     ################################################################################################
     # 2. Conduct the experiments
     ################################################################################################
     # Add a variable to determine the best distane from the average for load shedding. Tries to keep the load shedding  equality
-    model.ext[:variables][:load_shedding_fairness] = @variable(model, c_ls_fair>=0.0001)
+    #model.ext[:variables][:load_shedding_fairness] = @variable(model, c_ls_fair>=0.0001)
 
     #################################################################################################
     # Loop through all the tests defined in the experimental setup
@@ -278,8 +280,8 @@ function acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save
 
             # Minimize the cost of active power generation and cost of HVDC line usage
             # assumes costs are given as quadratic functions
-            @objective(model, Min, acopf_obj
-                            + load_shed_obj)
+            @objective(model, Min, acopf_obj)
+                           # + load_shed_obj)
 
         return model, ref[:load], ref[:baseMVA], ref[:bus]
 end
@@ -291,7 +293,7 @@ current_dir = pwd()
 load_data_name = current_dir*"/pv_data/Pload_p.csv"
 pv_data_name = current_dir*"/pv_data/pv_gen.csv"
 ghi_data_name = current_dir*"/pv_data/ghi.csv"
-load_data_normed = read_load_data(load_data_name)
+load_data_normed, load_data_raw = read_load_data(load_data_name)
 pv_data_normed, ghi_data_normed = read_pv_data(pv_data_name, ghi_data_name)
 scale_pv = pv_data_normed.*ghi_data_normed
 acopf_model, ref_load, ref_baseMVA, ref_bus  = acopf_main(data, scale_load, scale_gen, c_load_vary, c_fair, date, save_folder, iteration_number)
@@ -315,10 +317,12 @@ function run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scal
     eb_out = []
     pv_out = []
     loads = []
+    lmp_df = DataFrame(bus=Int[], lmp=Float64[])
     for (i,bus) in ref_bus
         if i != 1
-            push!(bus_order, i)
+            push!(bus_order, bus["bus_i"])
             push!(lmp_vec_pf,dual(active_power_nodal_constraints[i]))
+            push!(lmp_df, [bus["bus_i"], dual(active_power_nodal_constraints[i])])
         end
     end
     for (i,load) in ref_load
@@ -326,31 +330,16 @@ function run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scal
         #push!(p_load_out, value(p_load[i]))
     end
     save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref_baseMVA))
-    # if eb_constraint_flag
-    #     for (i,load) in ref[:load]
-    #         if iteration_number == 1
-    #             push!(eb_out, 1)
-    #         else 
-    #             push!(eb_out, value(eb[i]))
-    #         end
-    #     end
-    # end
-    # basemva = ref[:baseMVA]
-    # if pv_constraint_flag
-    #     for (i,load) in ref[:load]
-    #         push!(pv_out,value(pv_gen[i]))
-    #     end
-    # else
-    #     pv_gen_out = 0
-    # end
-    return lmp_vec_pf, bus_order, loads
+    return lmp_vec_pf, lmp_df, bus_order, loads
 end
 time_steps = 2
-days = 2
-dlmp_base, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+days = 8
+dlmp_base,lmp_df, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
 
 @variable(acopf_model, x_pv[i in keys(ref_load), 1:days, 1:time_steps] >= 0)
 dlmp_positive = -dlmp_base 
+
+extr_load, extr_pv = extract_small_amount_of_time(4, 2, load_data_normed, scale_pv, 5)
 
 for day in 1:days
     for tstep in 1:time_steps
@@ -358,32 +347,40 @@ for day in 1:days
         for i in keys(ref_load)
             JuMP.set_upper_bound(x_pv[i,day,tstep],scale_load*ref_load[i]["pd"] )
         end
-        @constraint(acopf_model, sum(([scale_load*load["pd"]*ref_baseMVA for (i,load) in ref_load].-[scale_pv[day*tstep]*x_pv[i,day,tstep]*ref_baseMVA for (i,load) in ref_load]).*dlmp_positive)/70000 <= eb_threshold)
+        @constraint(acopf_model, sum(([extr_load[extr_load.day .== day, 2]*load["pd"]*ref_baseMVA for (i,load) in ref_load].-[extr_pv[extr_pv.day .== day,2]*x_pv[i,day,tstep]*ref_baseMVA for (i,load) in ref_load]).*dlmp_positive)./70000 .<= eb_threshold)
     end
 end
 
-lmp_vec_pv, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+# 2 figures with 8 line plots, one for each day figure(pv, load)
+# 1 figure with 8 line plots, one for each day figure(pv, load)
+load_plot = plot()
+for day in 1:days
+    load_plot = plot!( 1:288, extr_load[extr_load.day .== day, 2], xlabel="Time Step", ylabel="Load", title="Demand for Eight Representative Days", label = "$day")
+end
+savefig(load_plot, "plots_$date/load_day.png")
+
+pv_plot = plot()
+for day in 1:days
+    pv_plot = plot!( 1:288, extr_pv[extr_pv.day .== day, 2], xlabel="Time Steps", ylabel="PV Generation", title="PV Generation for Eight Representative Days",label = "$day")
+end
+savefig(pv_plot, "plots_$date/pv_day.png")
+# add the update for including the pv in the power balance 
+# add pv costs to the objects
+
+lmp_vec_pv, lmp_df, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
 #caculate the energy burden per bus per day and time step
 eb = DataFrame(bus=Int[], day=Int[], tstep=Int[], eb=Float64[])
 for (i,b) in ref_load
-    println("Bus: ", b["index"]) 
     for d in 1:days
         for t in 1:time_steps
-            eb_day = (p_load[i]-value(x_pv[b["index"],d,t]))*dlmp_positive[i]/70000
+            dlmp_positive = -lmp_df[lmp_df.bus .== b["index"],2]
+            if b["index"] == 1
+                dlmp_positive = 0
+            end
+            eb_day = (p_load[i]-value(x_pv[b["index"],d,t]))*dlmp_positive/70000
+            eb_day = eb_day[1]
             push!(eb,[b["index"],d,t,eb_day])
         end
     end
 end
-# Plot a heatmap for the lmps, buses, and fairness cost; for the PV generation case
-lmp_pv_heatmap = heatmap()
-int_per_day = time_steps
-heatmap_data = zeros(length(bus_order), int_per_day)
-for day in 1:num_days
-    lmp_results_filtered_daily = filter(row -> row.Day == day, lmp_results_minutes_pv_constraint)
-    for i in 1:int_per_day
-        lmp_results_filtered = filter(row -> row.Iteration == i, lmp_results_filtered_daily)
-        heatmap_data[:,i] .= lmp_results_filtered[:,:LMP][1] 
-    end
-    lmp_pv_heatmap = heatmap(heatmap_data, title="LMPs for Active Power Balance, Objective", ylabel="Bus Number", xlabel="Time Step", color=:viridis)
-    savefig(lmp_pv_heatmap, joinpath(save_folder, "lmp/lmp_pv_heatmap_$day.png"))
-end
+

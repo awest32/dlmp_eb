@@ -135,13 +135,13 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
 
     # Add a variable to represent the cost of active power load at each bus (AW added 9/17/2024)
     # Find max load out of all of the loads
-    max_load =  scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
-    min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
-    p_load = model.ext[:variables][:p_load] = @variable(model, min_load <=p_load[i in keys(ref[:load])] <= max_load)
+    # max_load =  scale_load*maximum([load["pd"] for (i,load) in ref[:load]])
+    # min_load = 0.1*max_load #minimum([load["pd"] for (i,load) in ref[:load]])
+    # p_load = model.ext[:variables][:p_load] = @variable(model, min_load <=p_load[i in keys(ref[:load])] <= max_load)
 
-    for i in keys(ref[:load])
-        @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
-    end
+    # for i in keys(ref[:load])
+    #     @constraint(model, p_load[i]  .<= scale_load*ref[:load][i]["pd"])
+    # end
     for (l,dcline) in ref[:dcline]
         f_idx = (l, dcline["f_bus"], dcline["t_bus"])
         t_idx = (l, dcline["t_bus"], dcline["f_bus"])
@@ -189,7 +189,7 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
             sum(p_dc[a_dc] for a_dc in ref[:bus_arcs_dc][i]) ==     # sum of active power flow on HVDC lines from bus i =
             sum(pg[g] for g in ref[:bus_gens][i]) -                 # sum of active power generation at bus i -
             #sum(load["pd"] for load in bus_loads) -                 # sum of active load consumption at bus i -
-            sum(p_load[p_l] for p_l in ref[:bus_loads][i]) -                 # sum of active load consumption at bus i -
+            #sum(p_load[p_l] for p_l in ref[:bus_loads][i]) -                 # sum of active load consumption at bus i -
             sum(shunt["gs"] for shunt in bus_shunts)*vm[i]^2        # sum of active shunt element injections at bus i
         ))
 
@@ -293,7 +293,7 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
     sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] + dcline["cost"][3] for (i,dcline) in ref[:dcline])
     )
 
-    @expression(model, load_shed_obj,sum(c_load_vary*(scale_load*load["pd"] - p_load[i]) for (i,load) in ref[:load]))
+    #@expression(model, load_shed_obj,sum(c_load_vary*(scale_load*load["pd"] - p_load[i]) for (i,load) in ref[:load]))
     ################################################################################################
     # 2. Conduct the experiments
     ################################################################################################
@@ -333,10 +333,10 @@ function acopf_main(eb_constraint_flag, pv_constraint_flag, pv_gen_normed, data,
                     push!(lmp_vec_pf,dual(active_power_nodal_constraints[i]))
                 end
             end
-            for (i,load) in ref[:load]
-                push!(loads, value(p_load[i]))
-                #push!(p_load_out, value(p_load[i]))
-            end
+            # for (i,load) in ref[:load]
+            #     push!(loads, value(p_load[i]))
+            #     #push!(p_load_out, value(p_load[i]))
+            # end
             save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref[:baseMVA]))
             if eb_constraint_flag
                 for (i,load) in ref[:load]
