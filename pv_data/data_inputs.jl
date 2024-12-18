@@ -46,9 +46,11 @@ end
 # pload_data_normed,pload_data = read_load_data(current_dir*"/Pload_p.csv")
 # pv_data_normed, ghi_data_normed = read_pv_data(current_dir*"/pv_gen.csv", current_dir*"/ghi.csv")
 
-function extract_small_amount_of_time(time_frame,days,load_data, pv_data,data_resolution)
+function extract_small_amount_of_time(offset,time_frame,days,load_data, pv_data,data_resolution)
     #extract the small time frame from the data
-    seasonal_time_daily = Int(floor((238)/3.5))
+    seasonal_time_daily = Int(floor((238-offset)/3))
+    yearly_time = 365*24*(60/data_resolution)
+    yearly_time_intervals = 3*Int(yearly_time)
     seasonal_time_intervals = seasonal_time_daily*24*(60/data_resolution)
     seasonal_time_intervals = Int(seasonal_time_intervals)
     #load_days = size(load_data)[2]
@@ -65,7 +67,7 @@ function extract_small_amount_of_time(time_frame,days,load_data, pv_data,data_re
             println("seasonal_time_daily: ", (seasonal_time_daily*(i-1) +1*j))
             test_days = load_data[:, (1*j)+(seasonal_time_daily*(i-1))]
             println("seasonal_time_intervals: ", day*seasonal_time_intervals+1)
-            test_ints = pv_data[(1*j)+(seasonal_time_intervals*(i-1)):(1*j) + (seasonal_time_intervals*(i-1)) + Int(24*(60/data_resolution))]
+            test_ints = pv_data[(yearly_time_intervals+(1*j)+(seasonal_time_intervals*(i-1))):(yearly_time_intervals+(1*j)+(seasonal_time_intervals*(i-1)) + Int(24*(60/data_resolution)))]
             for z in 1:Int(24*(60/data_resolution))
                 #rint("Interval: ", z)
                 push!(test_load, [day, test_days[z]])
