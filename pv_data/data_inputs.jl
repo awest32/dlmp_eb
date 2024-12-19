@@ -60,13 +60,13 @@ function extract_small_amount_of_time(offset,time_frame,days,load_data, pv_data,
     test_pv = DataFrame(day = Int[],pv = Float64[])
     day = 0
     for i in 1:time_frame#seasons
-        println("season number: ", i)
+        #println("season number: ", i)
         for j in 1:days
             day += 1
-            println("day: ", j)
-            println("seasonal_time_daily: ", (seasonal_time_daily*(i-1) +1*j))
+            #println("day: ", j)
+            #println("seasonal_time_daily: ", (seasonal_time_daily*(i-1) +1*j))
             test_days = load_data[:, (1*j)+(seasonal_time_daily*(i-1))]
-            println("seasonal_time_intervals: ", day*seasonal_time_intervals+1)
+            #println("seasonal_time_intervals: ", day*seasonal_time_intervals+1)
             test_ints = pv_data[(yearly_time_intervals+(1*j)+(seasonal_time_intervals*(i-1))):(yearly_time_intervals+(1*j)+(seasonal_time_intervals*(i-1)) + Int(24*(60/data_resolution)))]
             for z in 1:Int(24*(60/data_resolution))
                 #rint("Interval: ", z)

@@ -344,7 +344,7 @@ sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] 
 # 2. Conduct the experiments
 ################################################################################################
 # Add a variable to determine the best distane from the average for load shedding. Tries to keep the load shedding  equality
-model.ext[:variables][:load_shedding_fairness] = @variable(model, c_ls_fair>=0.0001)
+#model.ext[:variables][:load_shedding_fairness] = @variable(model, c_ls_fair>=0.0001)
 
 #################################################################################################
 # Loop through all the tests defined in the experimental setup
@@ -374,13 +374,13 @@ for i in 1:r
     println("Scenarios: $scenarios")
     println("Active Test Scenarios: $(scenarios[true_flags])")
 
-    for cost_fair in c_fair
+    #for cost_fair in c_fair
         #for cost_ls in c_load_vary
 
             # Minimize the cost of active power generation and cost of HVDC line usage
             # assumes costs are given as quadratic functions
             @objective(model, Min, acopf_obj
-                            + load_shed_obj
+                            #+ load_shed_obj
                 #+ fair_obj_1*cost_fair*sum(abs(c_ls_fair-(p_load[i]/(scale_load*load["pd"]))) for (i,load) in ref[:load])
                 #+ fair_obj_2*cost_fair*sum(abs((p_load[i+1]/(scale_load*ref[:load][i+1]["pd"])) - (p_load[i]/(scale_load*ref[:load][i]["pd"]))) for i in 1:(length(ref[:load])-1))
             )
@@ -506,7 +506,7 @@ for i in 1:r
             results[i][cost_fair][c_load_vary]["im_max"] = im_max_vec
             results[i][cost_fair][c_load_vary]["im_min"] = im_min_vec
             save("results_exp_$(i)_$(cost_fair).jld2", "results", results)
-    end
+   # end
 end
 # plot the percent load shed per bus for each test scenario and each value od the fairness cost
 for i in 1:r
