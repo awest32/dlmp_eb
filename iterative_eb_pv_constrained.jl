@@ -492,7 +492,7 @@ for iteration in 1:max_iterations
     extr_pv[extr_pv.day .== 7, 2] = extr_pv_more[extr_pv_more.day .==7, 2]
     scale_load = extr_load
     scale_pv = extr_pv
-
+    
     days = 8 # The number of days to simulate
     time_steps = 288 # The number of time steps per day
     scale_gen = 1 
@@ -501,7 +501,12 @@ for iteration in 1:max_iterations
     save_folder = "plots_$date/"
     scale_load = extr_load 
 
+    ghi_day_4=plot(1:time_steps,scale_pv[scale_pv.day .== 4,2],title="PV Generation Normalized Day 4")
+    savefig(ghi_day_4, "plots_$date/ghi_day_4.png")
+    load_day_4=plot(1:time_steps,scale_load[scale_load.day .== 4,2],title="Load Normalized Day 4")
+    savefig(load_day_4, "plots_$date/load_day_4.png")
     # Run the ACOPF model
+
     acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, date, save_folder, iteration)
     # Add the PV energy burden generation costs for each day and timestep
     add_pv_costs_to_objective(acopf_model, pv_lcoe)
@@ -593,27 +598,38 @@ for iteration in 1:max_iterations
     title!(lmp_plot, "LMPs per Bus - Day 2, Iteration $iteration")
     savefig(lmp_plot, "plots_$date/lmp_profiles_iteration_$iteration.png")
     # Get load data for bus 5, day 2
-load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
+    load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
 
-# Get PV data for bus 5, day 2
-pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
+    # Get PV data for bus 5, day 2
+    pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
 
-# Plot both on same axes
-plot!(comparison_plot, 1:time_steps, load_data, 
-      label="Load", 
-      linewidth=2, 
-      marker=:circle,
-      markersize=3)
-plot!(comparison_plot, 1:time_steps, pv_values, 
-      label="PV Generation",
-      linewidth=2,
-      marker=:square,
-      markersize=3)
+    # Plot both on same axes
+    plot!(comparison_plot, 1:time_steps, load_data, 
+        label="Load", 
+        linewidth=2, 
+        marker=:circle,
+        markersize=3)
+    plot!(comparison_plot, 1:time_steps, pv_values, 
+        label="PV Generation",
+        linewidth=2,
+        marker=:square,
+        markersize=3)
 
-xlabel!("Time Step")
-ylabel!("Power (MW)")
-title!("Load vs PV Generation for Bus 5 on Day 4")
-savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
+    xlabel!("Time Step")
+    ylabel!("Power (MW)")
+    title!("Load vs PV Generation for Bus 5 on Day 4")
+    savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
+
+    pv_alone = plot(1:time_steps, pv_values, 
+        label="PV Generation",
+        linewidth=2,
+        marker=:square,
+        markersize=3)
+
+    xlabel!("Time Step")
+    ylabel!("Power (MW)")
+    title!("PV Generation for Bus 5 on Day 4")
+    savefig(pv_alone, "plots_$date/pv_bus5_day4.png")
 
 end
 

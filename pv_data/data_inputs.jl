@@ -13,14 +13,14 @@ function read_load_data(load_file_name)
     # The columns are the days (238)
     # The rows are the 5 minute intervals (288)
     pload_mat = DataFrame(CSV.File(load_file_name))# |> Tables.matrix
-    max_pload = 1
+    max_pload = 0
     r,c = size(pload_mat)
     pload_data = zeros(r,c)
     for col in 1:c
         for row in 1:r
             pload_data[row,col] = pload_mat[row,col]
             if !isnan(pload_data[row,col])
-                max_pload = max(max_pload,pload_data[r,col])
+                max_pload = max(max_pload,pload_data[row,col])
             # else
             #     pload_data[r,col] = 0
             end
