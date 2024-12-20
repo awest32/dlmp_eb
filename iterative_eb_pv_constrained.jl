@@ -534,10 +534,12 @@ for iteration in 1:max_iterations
     # Get the total PV generation for timestep t
     tot_pv = []
     total_pv_generation_per_bus = []
+    tot_pv_dataframe = DataFrame(bus=Int[], day=Int[], tstep=Int[], pv=Float64[])
     for i in keys(ref_load)
         tot_pv_bus = []
         for d in 1:days
             for t in 1:time_steps
+                push!(tot_pv_dataframe, [i, d, t, value(acopf_model.ext[:variables][:x_pv][i,d,t])])
                push!(tot_pv_bus, value(acopf_model.ext[:variables][:x_pv][i,d,t]))
             end
             push!(tot_pv, tot_pv_bus)
@@ -630,7 +632,20 @@ for iteration in 1:max_iterations
     ylabel!("Power (MW)")
     title!("PV Generation for Bus 5 on Day 4")
     savefig(pv_alone, "plots_$date/pv_bus5_day4.png")
-
+    #plot pv per node for day 4
+    pv_per_node = plot()
+    for i in keys(ref_load)
+        pv_data = tot_pv_dataframe[(tot_pv_dataframe.bus .== i) .&( tot_pv_dataframe.day .== 4), 4]
+        plot!(pv_per_node, 1:time_steps,pv_data,
+            label="Bus $i", 
+            linewidth=2, 
+            marker=:circle,
+            markersize=3)
+    end
+    xlabel!("Time Step")
+    ylabel!("Power (MW)")
+    title!("PV Generation per Node for Day 4")
+    savefig(pv_per_node, "plots_$date/pv_per_node_day4.png")
 end
 
 # Plot convergence
