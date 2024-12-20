@@ -143,7 +143,8 @@ function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_
         for d in 1:days
             for t in 1:time_steps
                 if pv_constraint_flag == true
-                    @constraint(model,x_pv[i,d,t] .<= scale_load[scale_load.day .== d, 2][t] * ref[:load][i]["pd"])
+                    #don't include scaling for the load, so that if it is max rated load the pv can handle it
+                    @constraint(model,x_pv[i,d,t] .<= ref[:load][i]["pd"] *scale_pv[scale_pv.day .== d,2][t])
                 else
                     JuMP.set_upper_bound(x_pv[i,d,t], 0)#scale_load[scale_load.day .== d, 2][t] * ref[:load][i]["pd"])
                 end
@@ -591,6 +592,29 @@ for iteration in 1:max_iterations
     ylabel!(lmp_plot, "LMP (\$/MWh)")
     title!(lmp_plot, "LMPs per Bus - Day 2, Iteration $iteration")
     savefig(lmp_plot, "plots_$date/lmp_profiles_iteration_$iteration.png")
+    # Get load data for bus 5, day 2
+load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
+
+# Get PV data for bus 5, day 2
+pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
+
+# Plot both on same axes
+plot!(comparison_plot, 1:time_steps, load_data, 
+      label="Load", 
+      linewidth=2, 
+      marker=:circle,
+      markersize=3)
+plot!(comparison_plot, 1:time_steps, pv_values, 
+      label="PV Generation",
+      linewidth=2,
+      marker=:square,
+      markersize=3)
+
+xlabel!("Time Step")
+ylabel!("Power (MW)")
+title!("Load vs PV Generation for Bus 5 on Day 4")
+savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
+
 end
 
 # Plot convergence
@@ -734,10 +758,10 @@ savefig(max_burden_plot, "plots_$date/max_burden.png")
 comparison_plot = plot()
 
 # Get load data for bus 5, day 2
-load_data =  [value(acopf_model.ext[:variables][:p_load][5,2,t]) for t in 1:time_steps]
+load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
 
 # Get PV data for bus 5, day 2
-pv_values = [value(acopf_model.ext[:variables][:x_pv][5,2,t]) for t in 1:time_steps]
+pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
 
 # Plot both on same axes
 plot!(comparison_plot, 1:time_steps, load_data, 
@@ -753,5 +777,5 @@ plot!(comparison_plot, 1:time_steps, pv_values,
 
 xlabel!("Time Step")
 ylabel!("Power (MW)")
-title!("Load vs PV Generation for Bus 5 on Day 2")
-savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day2.png")
+title!("Load vs PV Generation for Bus 5 on Day 4")
+savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
