@@ -56,7 +56,7 @@ eb_threshold = 0.06 # 6% of the average load
 
 PowerModels.silence()
 
-function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_flag, date, save_folder, iteration_number)
+function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_flag, eb_constraint_flag, date, save_folder, iteration_number, lmp_df)
     PowerModels.standardize_cost_terms!(data, order=2)
 
     # Adds reasonable rate_a values to branches without them
@@ -121,41 +121,13 @@ function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_
         JuMP.set_upper_bound(q_dc[f_idx], dcline["qmaxt"])
     end
 
-    # Create the p_load parameter for each load, day, and timestep
-    p_load = model.ext[:variables][:p_load] = Dict()
-    p_load = model.ext[:variables][:p_load] = @variable(model, p_load[i in keys(ref[:load]), 1:days, 1:time_steps])
-
-    for i in keys(ref[:load])
-        #println("Load: ", i)
-        for d in 1:days
-         #   println("Day: ", d)
-            for t in 1:time_steps
-          #     println("Time Step: ", t)
-                #println("scale_load: ", scale_load[scale_load.day .== d, 2][t])
-                @constraint(model,p_load[i,d,t] .== scale_load[scale_load.day .== d, 2][t] * ref[:load][i]["pd"])
-            end
-        end
-    end
-
     # Add a variable to represent the cost of active pv power at each bus 
-    x_pv = model.ext[:variables][:x_pv] = @variable(model, 0 <= x_pv[i in keys(ref[:load]), 1:days, 1:time_steps])
-    for i in keys(ref[:load])
-        for d in 1:days
-            for t in 1:time_steps
-                if pv_constraint_flag == true
-                    #don't include scaling for the load, so that if it is max rated load the pv can handle it
-                    @constraint(model,x_pv[i,d,t] .<= ref[:load][i]["pd"] *scale_pv[scale_pv.day .== d,2][t])
-                else
-                    JuMP.set_upper_bound(x_pv[i,d,t], 0)#scale_load[scale_load.day .== d, 2][t] * ref[:load][i]["pd"])
-                end
-            end
-        end
-    end
-    
+    x_pv = model.ext[:variables][:x_pv] = @variable(model, x_pv[i in keys(ref[:load])] >=0)
     # Add Constraints
     # ---------------
     model.ext[:constraints] = Dict()
     model.ext[:constraints][:nodal_active_power_balance] = []
+    model.ext[:constraints][:nodal_reactive_power_balance] = []
     # Fix the voltage angle to zero at the reference bus
     for (i,bus) in ref[:ref_buses]
         model.ext[:constraints][:va_i] = @constraint(model, va[i] == 0)
@@ -175,20 +147,20 @@ function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_
         push!(model.ext[:constraints][:nodal_active_power_balance],@constraint(model,
             sum(p[a] for a in ref[:bus_arcs][i]) +                  # sum of active power flow on lines from bus i +
             sum(p_dc[a_dc] for a_dc in ref[:bus_arcs_dc][i]) ==     # sum of active power flow on HVDC lines from bus i =
-            sum(pg[g] for g in ref[:bus_gens][i]) -                 # sum of active power generation at bus i -
-            sum(p_load[l,d,t] for l in ref[:bus_loads][i] for d in 1:days for t in 1:time_steps) +        # sum of active load consumption at bus i -
-            sum(x_pv[pv,d,t] for pv in ref[:bus_loads][i] for d in 1:days for t in 1:time_steps) -  # sum of PV generation at bus i +
+            sum(pg[g] for g in ref[:bus_gens][i]) +                  # sum of active power generation at bus i -
+            sum(x_pv[pv]*scale_pv[scale_pv.day .== d,2][t] for d in 1:days for t in 1:time_steps for pv in ref[:bus_loads][i]) -  # sum of PV generation at bus i +
+            sum(load["pd"]*scale_load[scale_load.day .== d,2][t] for d in 1:days for t in 1:time_steps for load in bus_loads) +        # sum of active load consumption at bus i -
             sum(shunt["gs"] for shunt in bus_shunts)*vm[i]^2        # sum of active shunt element injections at bus i
         ))
 
         # Reactive power balance at node i
-        model.ext[:constraints][:nodal_reactive_power_balance] = @constraint(model,
+        push!(model.ext[:constraints][:nodal_reactive_power_balance], @constraint(model,
             sum(q[a] for a in ref[:bus_arcs][i]) +                  # sum of reactive power flow on lines from bus i +
             sum(q_dc[a_dc] for a_dc in ref[:bus_arcs_dc][i]) ==     # sum of reactive power flow on HVDC lines from bus i =
             sum(qg[g] for g in ref[:bus_gens][i]) -                 # sum of reactive power generation at bus i -
             sum(load["qd"] for load in bus_loads) +                 # sum of reactive load consumption at bus i -
             sum(shunt["bs"] for shunt in bus_shunts)*vm[i]^2        # sum of reactive shunt element injections at bus i
-        )
+        ))
 
         ########
         #AW added slack bus voltage magnitude equality constraint
@@ -198,6 +170,36 @@ function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_
             slack_vm_limit = model.ext[:constraints][:slack_vm_limits] = @constraint(model, vm[i] == 1)
         end
 
+    end
+
+    # PV constraints
+    for i in keys(ref[:load])
+        for d in 1:days
+            for t in 1:time_steps
+                if pv_constraint_flag == true
+                    #don't include scaling for the load, so that if it is max rated load the pv can handle it
+                    @constraint(model,x_pv[i] <= ref[:load][i]["pd"]*scale_pv[scale_pv.day .== d,2][t])
+                else
+                    JuMP.set_upper_bound(x_pv[i], 0)#scale_load[scale_load.day .== d, 2][t] * ref[:load][i]["pd"])
+                end
+            end
+        end
+    end
+    
+
+    # Energy poverty constraint
+    model.ext[:constraints][:eb] = []
+    if eb_constraint_flag == true
+        eb = []
+        for i in keys(ref[:load])
+            lmp = lmp_df.lmp[lmp_df.bus .== i][1]
+            normal_loads = [scale_load[scale_load.day .== d, 2][t]*ref[:load][i]["pd"]*ref[:baseMVA]  for d in 1:days for t in 1:time_steps]
+            pv_amounts = [scale_pv[scale_pv.day .== d,2][t]*model.ext[:variables][:x_pv][i]*ref[:baseMVA] for d in 1:days for t in 1:time_steps]
+            load_diff = normal_loads - pv_amounts
+            push!(eb, sum(load_diff*lmp))
+        end
+        push!(model.ext[:constraints][:eb], @constraint(model, sum(eb) .<= eb_threshold*70000))
+        push!(model.ext[:constraints][:eb], @constraint(model, sum(eb) .>=0))
     end
 
     # Branch power flow physics and limit constraints
@@ -277,12 +279,18 @@ function acopf_main(data, days,time_steps, scale_load, scale_gen, pv_constraint_
     sum(dcline["cost"][1]*p_dc[from_idx[i]]^2 + dcline["cost"][2]*p_dc[from_idx[i]] + dcline["cost"][3] for (i,dcline) in ref[:dcline])
     )
 
-   
-            @objective(model, Min, acopf_obj)
+    if pv_constraint_flag == true
+            # Calculate the cost of PV generation
+            @expression(model, pv_cost_obj, pv_lcoe * sum(model[:x_pv][i] for i in keys(ref_load)))
 
-        return model, ref[:load], ref[:baseMVA], ref[:bus]
+            # Update the objective to include both the original objective and PV cost
+            @objective(model, Min, acopf_obj + pv_cost_obj)
+    else
+            @objective(model, Min, acopf_obj)
+    end
+    return model, ref[:load], ref[:baseMVA], ref[:bus]
 end
-function run_acopf(model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+function run_acopf(model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag, eb_constraint_flag)
     # Run the ACOPF model
     # -------------------
     # Define the solver
@@ -303,7 +311,7 @@ function run_acopf(model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, 
     loads = []
     
     # Initialize DataFrame with timesteps
-    lmp_df = DataFrame(bus=Int[], day=Int[], timestep=Int[], lmp=Float64[])
+    lmp_df = DataFrame(bus=Int[], lmp=Float64[])
     
     # Extract LMPs for each bus and timestep
     for (i,bus) in ref_bus
@@ -313,27 +321,15 @@ function run_acopf(model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, 
             push!(lmp_vec_pf, lmp_value)
             
             # Add LMP values for each timestep
-            for d in 1:days
-                for t in 1:time_steps
+            #for d in 1:days
+            #    for t in 1:time_steps
                     #Divide by the baseMVA to convert the lmps into $/MWh, divide by -1 to be positive
-                    push!(lmp_df, [bus["bus_i"], d, t, lmp_value/(-ref_baseMVA)])
-                end
-            end
+                    push!(lmp_df, [bus["bus_i"], lmp_value/(-ref_baseMVA)])
+            #    end
+            #end
         end
 
-    #export the value of the p_load and ref_load*scale_load at each time step per day and bus
-    ref_load_scaled_out = DataFrame(bus=Int[], day=Int[], load=Float64[])
-    
-    p_load_out = value.(model.ext[:variables][:p_load])
-    for i in keys(ref_load)
-        for d in 1:days
-            for t in 1:time_steps
-            push!(ref_load_scaled_out, [i, d, ref_load[i]["pd"]*scale_load[scale_load.day .== d, 2][t]])
-            end
-        end
-    end
-    #save("lmp_.jld2", "lmp", lmp_vec_pf/(-ref_baseMVA))
-    return lmp_vec_pf, lmp_df, bus_order, ref_load_scaled_out, p_load_out
+    return lmp_vec_pf, lmp_df, bus_order
 end
 eb_constraint_flag = false
 pv_constraint_flag = false
@@ -354,61 +350,34 @@ pv_lcoe = 200
 
 extr_load, extr_pv = extract_small_amount_of_time(7,4, 2, load_data_normed, scale_pv, 5)
 extr_load_more, extr_pv_more = extract_small_amount_of_time(4,4, 2, load_data_normed, scale_pv, 5)
-extr_pv[extr_pv.day .== 7, 2] = extr_pv_more[extr_pv_more.day .==7, 2]
+extr_pv[extr_pv.day .== 7, 2] = extr_pv_more[extr_pv_more.day .== 7, 2]
 scale_load = extr_load
 scale_pv = extr_pv
 
 # Iteration Zero: No PV Energy Burden Constraints
-acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, date, save_folder, iteration_number)
-dlmp_base,lmp_df, bus_order, ref_load_scaled_out, p_load_returned = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+lmp_df_init = DataFrame(bus=Int[], lmp=Float64[])
+acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, eb_constraint_flag, date, save_folder, iteration_number, lmp_df_init)
+dlmp_base,lmp_df, bus_order = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag, eb_constraint_flag)
 
 generation_costs_iter_zero = objective_value(acopf_model)
 
+# function add_pv_costs_to_objective(acopf_model, pv_lcoe)
+#     # Calculate the cost of PV generation
+#     @expression(acopf_model, pv_cost_obj, pv_lcoe * sum(acopf_model.ext[:variables][:x_pv][i] for i in keys(ref_load)))
 
-pv_constraint_flag = true
-eb_constraint_flag = false
+#     # Get the existing objective expression
+#     existing_obj = objective_function(acopf_model)
 
-#acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, date, save_folder, iteration_number)
-
-# Add the PV energy burden generation constraints for each day and timestep
-function add_eb_constraints(acopf_model, lmp_df, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
-    acopf_model.ext[:constraints][:eb] = Dict()
-    for day in 1:days
-        for tstep in 1:time_steps
-            lmps = []
-            for i in keys(ref_load)
-                push!(lmps, lmp_df.lmp[(lmp_df.day .== day) .& (lmp_df.bus .== i) .& (lmp_df.timestep .== tstep)][1])
-            end
-            #println("The LMPs for day $day and timestep $tstep are: $lmps")
-            normal_loads = [extr_load[extr_load.day .== day, 2][tstep]*load["pd"]*ref_baseMVA for (i,load) in ref_load]
-            pv_amounts = [extr_pv[extr_pv.day .== day,2][tstep]*acopf_model.ext[:variables][:x_pv][i,day,tstep]*ref_baseMVA for (i,load) in ref_load]
-            load_diff = normal_loads - pv_amounts
-            #eb_frac = load_diff/lmps
-            acopf_model.ext[:constraints][:eb][day,tstep] = @constraint(acopf_model, sum((normal_loads.-pv_amounts).*lmps)./70000 <= eb_threshold)
-        end
-    end
-    return acopf_model
-end
-
-#acopf_model = add_eb_constraints(acopf_model, lmp_df, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
-
-function add_pv_costs_to_objective(acopf_model, pv_lcoe)
-    # Calculate the cost of PV generation
-    @expression(acopf_model, pv_cost_obj, pv_lcoe * sum(acopf_model.ext[:variables][:x_pv][i,d,t] for i in keys(ref_load) for d in 1:days for t in 1:time_steps))
-
-    # Get the existing objective expression
-    existing_obj = objective_function(acopf_model)
-
-    # Update the objective to include both the original objective and PV cost
-    @objective(acopf_model, Min, existing_obj + pv_cost_obj)
-end
+#     # Update the objective to include both the original objective and PV cost
+#     @objective(acopf_model, Min, existing_obj + pv_cost_obj)
+# end
 
 # Add the PV cost to the objective function
 #add_pv_costs_to_objective(acopf_model, pv_lcoe)
 
 # Main iteration loop
 max_iterations = 10
-convergence_threshold = 0.001  # 0.1% difference between iterations
+convergence_threshold = 0.01  # 0.1% difference between iterations
 generation_costs_per_iteration = DataFrame(
     Iteration = Int[],
     Generation_Cost = Float64[]
@@ -428,31 +397,27 @@ metrics = DataFrame(
     mean_burden = Float64[],
     max_burden = Float64[]
 )
+generation_per_iteration = DataFrame(
+    iteration = Int[],
+    generation = Float64[]
+)
+
 # Calculate metrics for this iteration
     # Get the cost for timestep t
     cost = value(objective_value(acopf_model))
-    # Get the total load served for timestep t
-    tot_load = []
-    for i in keys(ref_load)
-        for d in 1:days
-            for t in 1:time_steps
-               push!(tot_load,value(acopf_model.ext[:variables][:p_load][i,d,t]))
-            end
-        end
-    end
-    total_load_served = sum(tot_load)
+    
     # Get the total PV generation for timestep t
     tot_pv = []
     total_pv_generation_per_bus = []
     for i in keys(ref_load)
-        tot_pv_bus = []
+        tot_pv_per_bus = []
         for d in 1:days
             for t in 1:time_steps
-               push!(tot_pv_bus, value(acopf_model.ext[:variables][:x_pv][i,d,t]))
+               push!(tot_pv_per_bus, value(acopf_model.ext[:variables][:x_pv][i])*scale_pv[scale_pv.day .== d,2][t])
             end
-            push!(tot_pv, tot_pv_bus)
         end
-        push!(total_pv_generation_per_bus, sum(tot_pv_bus))
+        push!(total_pv_generation_per_bus, sum(tot_pv_per_bus))
+        #push!(tot_pv, sum(tot_pv_per_bus))
     end
     total_pv_generation = sum(total_pv_generation_per_bus)
     # Get the total load for timestep t
@@ -466,18 +431,30 @@ metrics = DataFrame(
             end
         end
         push!(total_load_per_bus, sum(tot_load_per_bus))
-        push!(tot_load, sum(tot_load_per_bus))
+        #push!(tot_load, sum(tot_load_per_bus))
     end
-    total_load = sum(tot_load)
+    total_load = sum(total_load_per_bus)
     # Calculate the burden for timestep t, should be a vector of all of the burden per bus
-    burden = (total_load_per_bus .- total_pv_generation_per_bus)./total_load_per_bus
+    dlmps = lmp_df.lmp[lmp_df.bus .!= 1]
+    burden = ((total_load_per_bus .- total_pv_generation_per_bus).*dlmps)./70000
     # Calculate the max burden for timestep t
     max_burden = maximum(burden)
     # Calculate the mean burden for timestep t
     mean_burden = mean(burden)
     push!(metrics, [iteration, cost, total_load, total_pv_generation, mean_burden, max_burden])
     
+convergence_iteration = []
+pv_constraint_flag = true
+eb_constraint_flag = true
+old_lmp_df = lmp_df_list[end]
+
+acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, eb_constraint_flag, date, save_folder, iteration, old_lmp_df)
+
 for iteration in 1:max_iterations
+    push!(convergence_iteration, iteration)
+    println("#################################")
+    println("Iteration: $iteration")
+    println("#################################")
     current_dir = pwd()
     load_data_name = current_dir*"/pv_data/Pload_p.csv"
     pv_data_name = current_dir*"/pv_data/pv_gen.csv"
@@ -497,6 +474,7 @@ for iteration in 1:max_iterations
     time_steps = 288 # The number of time steps per day
     scale_gen = 1 
     pv_constraint_flag = true
+    eb_constraint_flag = true
     date = Dates.today() 
     save_folder = "plots_$date/"
     scale_load = extr_load 
@@ -506,47 +484,42 @@ for iteration in 1:max_iterations
     load_day_4=plot(1:time_steps,scale_load[scale_load.day .== 4,2],title="Load Normalized Day 4")
     savefig(load_day_4, "plots_$date/load_day_4.png")
     # Run the ACOPF model
-
-    acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, date, save_folder, iteration)
-    # Add the PV energy burden generation costs for each day and timestep
-    add_pv_costs_to_objective(acopf_model, pv_lcoe)
     # Add the PV energy burden generation constraints for each day and timestep
     old_lmp_df = lmp_df_list[end]
-    acopf_model = add_eb_constraints(acopf_model, old_lmp_df, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
-    
+
+    acopf_model, ref_load, ref_baseMVA, ref_bus = acopf_main(data, days, time_steps, scale_load, scale_gen, pv_constraint_flag, eb_constraint_flag, date, save_folder, iteration, old_lmp_df)
+    # Add the PV energy burden generation costs for each day and timestep
+    #println(keys(acopf_model.ext[:constraints]))
+    println("------------------------------------------------------------------")
+    println("The objective is: $(objective_function(acopf_model))")
+    println("------------------------------------------------------------------")
+    #add_pv_costs_to_objective(acopf_model, pv_lcoe)
+    # println("------------------------------------------------------------------")
+    # println("The objective is now: $(objective_function(acopf_model))")
+    # println("------------------------------------------------------------------")
+    #println(keys(acopf_model.ext[:constraints]))
+    #add_eb_constraints(acopf_model, old_lmp_df, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag, eb_constraint_flag)
+    #println(keys(acopf_model.ext[:constraints]))
     # Run ACOPF and get LMPs
-    lmp_vec_pv, lmp_df, bus_order, ref_scaled_out, p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+    lmp_vec_pv, lmp_df, bus_order = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag, eb_constraint_flag)
     push!(lmp_df_list, lmp_df)  
 
     # Calculate metrics for this iteration
     # Get the cost for timestep t
     cost = value(objective_value(acopf_model))
-    # Get the total load served for timestep t
-    tot_load = []
-    for i in keys(ref_load)
-        for d in 1:days
-            for t in 1:time_steps
-               push!(tot_load,value(acopf_model.ext[:variables][:p_load][i,d,t]))
-            end
-        end
-    end
-    total_load_served = sum(tot_load)
-    # Get the total PV generation for timestep t
+    
     tot_pv = []
     total_pv_generation_per_bus = []
-    tot_pv_dataframe = DataFrame(bus=Int[], day=Int[], tstep=Int[], pv=Float64[])
     for i in keys(ref_load)
-        tot_pv_bus = []
+        tot_pv_per_bus = []
         for d in 1:days
             for t in 1:time_steps
-                push!(tot_pv_dataframe, [i, d, t, value(acopf_model.ext[:variables][:x_pv][i,d,t])])
-               push!(tot_pv_bus, value(acopf_model.ext[:variables][:x_pv][i,d,t]))
+               push!(tot_pv_per_bus, value(acopf_model.ext[:variables][:x_pv][i])*scale_pv[scale_pv.day .== d,2][t])
             end
-            push!(tot_pv, tot_pv_bus)
         end
-        push!(total_pv_generation_per_bus, sum(tot_pv_bus))
+        push!(tot_pv, sum(tot_pv_per_bus))
     end
-    total_pv_generation = sum(total_pv_generation_per_bus)
+    total_pv_generation = sum(tot_pv)
     # Get the total load for timestep t
     tot_load = []
     total_load_per_bus = []
@@ -562,14 +535,50 @@ for iteration in 1:max_iterations
     end
     total_load = sum(tot_load)
     # Calculate the burden for timestep t, should be a vector of all of the burden per bus
-    burden = (total_load_per_bus .- total_pv_generation_per_bus)./total_load_per_bus
+    dlmps = lmp_df.lmp[lmp_df.bus .!= 1]
+    println("The lmps are: $(lmp_df.lmp)") 
+    burden = ((total_load_per_bus .- tot_pv).*dlmps)./70000
     # Calculate the max burden for timestep t
+    println("-----------------------------------------------")
+    println("The energy burden is: $burden")
+    println("-----------------------------------------------")
+    println("The total load is: $total_load")
+    println("The total PV generation is: $total_pv_generation")
+    println("-----------------------------------------------")
+    println("The lmps are: $dlmps") 
+    println("-----------------------------------------------")
     max_burden = maximum(burden)
-    # Calculate the mean burden for timestep t
+    # Calculate the mean burden for timestep t  
     mean_burden = mean(burden)
-    # Add the metrics for timestep t to the metrics dataframe
     push!(metrics, [iteration, cost, total_load, total_pv_generation, mean_burden, max_burden])
     
+    #plot the pv per node size at the end of each iteration
+    pv_per_iteration = scatter()
+   # for i in keys(ref_load)
+        scatter!(pv_per_iteration, collect(keys(ref_load)), [value(acopf_model.ext[:variables][:x_pv][i]) for i in keys(ref_load)],
+        linewidth=2, 
+        marker=:circle,
+        markersize=3)
+    #end
+    xlabel!(pv_per_iteration, "Buses")
+    ylabel!(pv_per_iteration, "PV Generation (kW)")
+    title!(pv_per_iteration, "PV Generation per Bus for Iteration $iteration")
+    savefig(pv_per_iteration, "plots_$date/pv_profiles_iteration_$iteration.png")
+
+    # store generation at each iteration
+    push!(generation_per_iteration, [iteration, value(acopf_model.ext[:variables][:pg][1])])
+    #plot the load per node size at the end of each iteration
+    load_per_iteration = scatter()
+    for i in keys(ref_load)
+        scatter!(load_per_iteration, collect(keys(ref_load)), [ref_load[i]["pd"] for i in keys(ref_load)], 
+        linewidth=2, 
+        marker=:circle,
+        markersize=3)
+    end
+    xlabel!(load_per_iteration, "Buses")
+    ylabel!(load_per_iteration, "Load (kW)")
+    title!(load_per_iteration, "Load per Bus for Iteration $iteration")
+    savefig(load_per_iteration, "plots_$date/load_profiles_iteration_$iteration.png")
 
     # Calculate current generation cost
     current_cost = objective_value(acopf_model)
@@ -580,38 +589,60 @@ for iteration in 1:max_iterations
     previous_cost = generation_costs_per_iteration[end-1,2]
     println("Previous generation cost for iteration $(iteration): $(generation_costs_per_iteration[end-1,2])")
     #Check for convergence
-    if abs((current_cost - previous_cost)) < convergence_threshold && iteration > 1
+    if abs((current_cost - previous_cost)) <= convergence_threshold && iteration > 1
         println("Converged after $iteration iterations!")
         break
     end
     
-    # Plot LMPs for this iteration
-    lmp_plot = plot()
-    for bus in unique(lmp_df.bus)
-        bus_data = lmp_df[(lmp_df.bus .== bus) .& (lmp_df.day .== 2), :]
-        plot!(lmp_plot, bus_data.timestep, bus_data.lmp, 
-              label="Bus $bus", 
-              linewidth=2, 
-              marker=:circle,
-              markersize=3)
+    # plot load data alone for all buses for with all days*time steps on the x-axis.
+    # the buses are the labels and the y-axis is the load data
+    load_data = []
+    load_plot = plot()
+    for i in keys(ref_load)
+        load_data = []
+        load_data = [scale_load[scale_load.day .== d, 2][t]*ref_load[i]["pd"] for d in 1:days for t in 1:time_steps]
+        plot!(load_plot, 1:time_steps*days, load_data, 
+            label="Bus $i",
+            linewidth=2,
+            marker=:square,
+            markersize=3)
+        xlabel!("Time Step")
+        ylabel!("Power (MW)")
+        title!("Demand for Bus $i")
+        savefig(load_plot, "plots_$(date)_load.png")
     end
-    xlabel!(lmp_plot, "Time Step")
-    ylabel!(lmp_plot, "LMP (\$/MWh)")
-    title!(lmp_plot, "LMPs per Bus - Day 2, Iteration $iteration")
-    savefig(lmp_plot, "plots_$date/lmp_profiles_iteration_$iteration.png")
-    # Get load data for bus 5, day 2
-    load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
 
-    # Get PV data for bus 5, day 2
-    pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
+    # plot pv data alone for all buses for with all days*time steps on the x-axis.
+    # the buses are the labels and the y-axis is the pv data
+    pv_values = []
+    pv_plot = plot()
+    last_bus = []
+    for i in keys(ref_load)
+        pv_values = []
+        pv_values = [value(acopf_model.ext[:variables][:x_pv][i])*scale_pv[scale_pv.day .== d,2][t] for d in 1:days for t in 1:time_steps]
+        plot!(pv_plot, 1:time_steps*days, pv_values, 
+            label="Bus $i",
+            linewidth=2,
+            marker=:square,
+            markersize=3)
+        xlabel!("Time Step")
+        ylabel!("Power (MW)")
+        title!("PV Generation for Bus $i")
+        savefig(pv_plot, "plots_$(date)_pv.png")
+        push!(last_bus, i)
+    end
 
+    # plot a comparison between load and pv for a all buses for with all days*time steps on the x-axis.
+    # the buses are the labels and the y-axis is the load and pv data
+
+    comparison_plot = plot()
     # Plot both on same axes
-    plot!(comparison_plot, 1:time_steps, load_data, 
+    plot!(comparison_plot, 1:time_steps*days, load_data, 
         label="Load", 
         linewidth=2, 
         marker=:circle,
         markersize=3)
-    plot!(comparison_plot, 1:time_steps, pv_values, 
+    plot!(comparison_plot, 1:time_steps*days, pv_values, 
         label="PV Generation",
         linewidth=2,
         marker=:square,
@@ -619,33 +650,9 @@ for iteration in 1:max_iterations
 
     xlabel!("Time Step")
     ylabel!("Power (MW)")
-    title!("Load vs PV Generation for Bus 5 on Day 4")
-    savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
+    title!("Load vs PV Generation")
+    savefig(comparison_plot, "plots_$date/load_vs_pv_bus_$(last_bus[end]).png")
 
-    pv_alone = plot(1:time_steps, pv_values, 
-        label="PV Generation",
-        linewidth=2,
-        marker=:square,
-        markersize=3)
-
-    xlabel!("Time Step")
-    ylabel!("Power (MW)")
-    title!("PV Generation for Bus 5 on Day 4")
-    savefig(pv_alone, "plots_$date/pv_bus5_day4.png")
-    #plot pv per node for day 4
-    pv_per_node = plot()
-    for i in keys(ref_load)
-        pv_data = tot_pv_dataframe[(tot_pv_dataframe.bus .== i) .&( tot_pv_dataframe.day .== 4), 4]
-        plot!(pv_per_node, 1:time_steps,pv_data,
-            label="Bus $i", 
-            linewidth=2, 
-            marker=:circle,
-            markersize=3)
-    end
-    xlabel!("Time Step")
-    ylabel!("Power (MW)")
-    title!("PV Generation per Node for Day 4")
-    savefig(pv_per_node, "plots_$date/pv_per_node_day4.png")
 end
 
 # Plot convergence
@@ -659,48 +666,26 @@ savefig(convergence_plot, "plots_$date/convergence.png")
 
 println("Final generation costs across iterations: ", generation_costs_per_iteration[:,2])
 
-# dlmp_base,lmp_df, bus_order,p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
+#Plot the mean burden per iteration
+mean_burden_plot = plot(metrics.iteration, metrics.mean_burden,
+                        xlabel="Iteration",
+                        ylabel="Mean Burden",
+                        title="Mean Burden Over Time",
+                        marker=:circle,
+                        label="Mean Burden")
+savefig(mean_burden_plot, "plots_$date/mean_burden.png")
 
+#Plot the max burden per iteration
+max_burden_plot = plot(metrics.iteration, metrics.max_burden,
+                        xlabel="Iteration",
+                        ylabel="Max Burden",
+                        title="Max Burden Over Time",
+                        marker=:circle,
+                        label="Max Burden")
+savefig(max_burden_plot, "plots_$date/max_burden.png")  
 
+# Plot the energy burden per bus for all iterations
 
-# # Plot for a specific bus (e.g., bus 5)
-# bus_to_plot = 5
-# for d in 1:days
-#     bus_data = filter(row -> row.bus == bus_to_plot && row.day == d, load_per_bus)
-#     plot!(load_plot, bus_data.timestep, bus_data.load, 
-#           xlabel="Time Step", 
-#           ylabel="Load (MW)", 
-#           title="Demand for Bus $bus_to_plot Across Eight Representative Days", 
-#           label="Day $d",
-#           linewidth=2,
-#           marker=:circle,
-#           markersize=3)
-# end
-# savefig(load_plot, "plots_$date/load_day.png")
-
-# lmp_vec_pv, lmp_df, bus_order,ref_scaled_out, p_load = run_acopf(acopf_model, ref_load, ref_baseMVA, ref_bus, scale_load, scale_pv, eb_threshold, pv_constraint_flag)
-# #caculate the energy burden per bus per day and time step
-# eb = DataFrame(bus=Int[], day=Int[], tstep=Int[], eb=Float64[])
-# for (i,b) in ref_load
-#     for d in 1:days
-#         for t in 1:time_steps
-#             dlmp_positive = -lmp_df[lmp_df.bus .== b["index"],2]
-#             if b["index"] == 1
-#                 dlmp_positive = 0
-#             end
-#             eb_day = (value(acopf_model.ext[:variables][:p_load][i][d][t])-value(acopf_model.ext[:variables][:x_pv][b["index"],d,t]))*dlmp_positive/70000
-#             eb_day = eb_day[1]
-#             push!(eb,[b["index"],d,t,eb_day])
-#         end
-#     end
-# end
-
-# # After optimization, collect metrics
-# cost = objective_value(acopf_model)
-# total_pv = sum(value.(acopf_model.ext[:variables][:x_pv]))
-# mean_burden = mean(eb.eb)
-# max_burden = maximum(eb.eb)
-# push!(metrics, [iteration_number, cost, total_pv, mean_burden, max_burden])
 
 # Create metrics plot
 metrics_plot = plot(
@@ -715,98 +700,3 @@ metrics_plot = plot(
 )
 savefig(metrics_plot, "plots_$date/metrics.png")
 
-# Create plot for total PV generation per day
-# pv_plot = plot(
-#     title="Total PV Generation Per Day",
-#     xlabel="Time Step",
-#     ylabel="Total PV Generation (kW)",
-#     legend=:outerright
-# )
-
-#for i in keys(ref_load)
-# day_pv = []
-#     for day in 1:days
-#         # Calculate total PV for all buses at each timestep for this day, convert from p.u. to kW (baseMVA * 1000)
-#           push!(day_pv,round(sum(value.(acopf_model.ext[:variables][:x_pv][5,day,:])), sigdigits=2))
-#             plot!(pv_plot, 1:time_steps, day_pv, label="Day $day", linewidth=2)
-#     end
-# #end
-# savefig(pv_plot, "plots_$date/total_pv_per_day.png")
-# create individual line plots for each metric with the x axis being the iteration number
-
-# total load plot
-total_load_plot = plot(
-    metrics.iteration,
-    metrics.total_load,
-    label="Total Load",
-    xlabel="Timestep",
-    ylabel="Value",
-    title="Total Load Over Time",
-    linewidth=2,
-    marker=:circle
-)
-savefig(total_load_plot, "plots_$date/total_load.png")
-
-# total pv generation
-total_pv_plot = plot(
-    metrics.iteration,
-    metrics.total_pv,
-    label="Total PV",
-    xlabel="Timestep",
-    ylabel="Value",
-    title="Total PV Generation Over Time",
-    linewidth=2,
-    marker=:circle
-)
-savefig(total_pv_plot, "plots_$date/total_pv.png")
-# Mean energy burden
-mean_burden_plot = plot(
-    metrics.iteration,
-    metrics.mean_burden,
-    label="Mean Burden",
-    xlabel="Timestep",
-    ylabel="Value",
-    title="Mean Energy Burden Over Time",
-    linewidth=2,
-    marker=:circle
-)
-savefig(mean_burden_plot, "plots_$date/mean_burden.png")
-
-# Max energy burden
-max_burden_plot = plot(
-    metrics.iteration,
-    metrics.max_burden,
-    label="Max Burden",
-    xlabel="Timestep",
-    ylabel="Value",
-    title="Max Energy Burden Over Time",
-    linewidth=2,
-    marker=:circle
-)
-savefig(max_burden_plot, "plots_$date/max_burden.png")
-
-# Plot comparison of PV and load for bus 5 on day 2
-comparison_plot = plot()
-
-# Get load data for bus 5, day 2
-load_data =  [value(acopf_model.ext[:variables][:p_load][5,4,t]) for t in 1:time_steps]
-
-# Get PV data for bus 5, day 2
-pv_values = [value(acopf_model.ext[:variables][:x_pv][5,4,t]) for t in 1:time_steps]
-
-# Plot both on same axes
-plot!(comparison_plot, 1:time_steps, load_data, 
-      label="Load", 
-      linewidth=2, 
-      marker=:circle,
-      markersize=3)
-plot!(comparison_plot, 1:time_steps, pv_values, 
-      label="PV Generation",
-      linewidth=2,
-      marker=:square,
-      markersize=3)
-
-xlabel!("Time Step")
-ylabel!("Power (MW)")
-title!("Load vs PV Generation for Bus 5 on Day 4")
-savefig(comparison_plot, "plots_$date/load_vs_pv_bus5_day4.png")
